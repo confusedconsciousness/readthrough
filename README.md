@@ -34,7 +34,9 @@ Settings live in `.odyssey.json`, readable only by you. The API key is never sen
 
 The API only answers this page. Requests from other sites are refused, so a webpage can't start reads or point the provider at its own server.
 
-Analyses are cached in `.cache/` by provider, model and the PR's head commit. When the PR gets a new push, the next open reads it again. **Re-read** in the status bar forces a fresh read.
+Tours are kept in `.cache/`, one per reader per commit. Opening a PR shows any tour of its current commit, whichever model wrote it. A PR is read again only when it gets new commits, or when you press **Re-read**, which uses the model currently selected. A read keeps running if you leave the page, and coming back picks it up where it is.
+
+The home page lists reads in progress, your tours (with their flow map and how many stops you've marked understood), and your open PRs and review requests, each with its size, review state and whether a tour is ready.
 
 Keys: `j`/`k` move between stops, `x` marks the current stop understood, `/` opens another PR. Each stop has its own URL (`#/owner/repo/123/2`).
 

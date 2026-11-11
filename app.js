@@ -95,40 +95,101 @@
   }
   const step = (d) => { const o = order(), i = o.indexOf(cur.sel); select(o[Math.max(0, Math.min(o.length - 1, (i < 0 ? 0 : i) + d))]); };
 
+  // One entry per PR for this page's lifetime: leaving a PR mid-read and coming back joins the same read
+  // instead of starting over. Re-read (fresh) starts a new entry. Failed requests are dropped so a retry refetches.
+  const memo = new Map();
+
   function open(key, sel = 'overview', fresh) {
-    const c = cur = { key, pr: cur?.key === key ? cur.pr : null, story: null, err: null, serr: null, t0: Date.now(), sel };
+    let m = memo.get(key);
+    if (!m || fresh) memo.set(key, (m = { t0: Date.now() }));
+    const c = cur = { key, pr: m.pr || null, story: m.story || null, err: null, serr: null, t0: m.t0, sel };
     render();
-    if (!c.pr) api(`/api/pr?pr=${key}`).then((pr) => { c.pr = pr; }, (e) => { c.err = e.message; }).then(() => c === cur && render());
-    api(`/api/story?pr=${key}${fresh ? '&fresh' : ''}`).then((s) => { c.story = s; }, (e) => { c.serr = e.message; }).then(() => c === cur && render());
+    m.prP ||= api(`/api/pr?pr=${key}`).then((pr) => { m.pr = pr; if (pr.reading && !m.story) m.t0 = pr.reading; return pr; });
+    m.storyP ||= api(`/api/story?pr=${key}${fresh ? '&fresh' : ''}`).then((st) => (m.story = st));
+    m.prP.then((pr) => { if (c === cur) { c.pr = pr; c.t0 = m.t0; render(); } }, (e) => { m.prP = null; if (c === cur) { c.err = e.message; render(); } });
+    m.storyP.then((st) => { if (c === cur) { c.story = st; render(); } else if (!cur) refreshRecent(); }, (e) => { m.storyP = null; if (c === cur) { c.serr = e.message; render(); } });
   }
 
   // ---------- home ----------
+
+  const STATE = { merged: 'Merged', draft: 'Draft', closed: 'Closed', open: 'Open' };
+  const REVIEW = { APPROVED: ['Approved', 'ok'], CHANGES_REQUESTED: ['Changes requested', 'bad'], REVIEW_REQUIRED: ['Needs review', ''] };
+  const keyLabel = (k) => esc(k.replace(/\/(\d+)$/, '')) + `<span class="num"> #${esc(k.split('/').pop())}</span>`;
+
+  // GitHub-style diffstat: five blocks split between additions and deletions.
+  function diffstat(a, d) {
+    const t = a + d, g = t ? Math.round((a / t) * 5) : 0, r = t ? Math.min(5 - g, Math.round((d / t) * 5)) : 0;
+    return `<span class="ds"><span class="up">+${a}</span> <span class="down">−${d}</span> <span class="blocks" aria-hidden="true">${'<i class="g"></i>'.repeat(g)}${'<i class="r"></i>'.repeat(r)}${'<i></i>'.repeat(5 - g - r)}</span></span>`;
+  }
 
   async function home() {
     cur = null;
     crumb.innerHTML = '';
     status.innerHTML = '';
     view.innerHTML = `<div class="home">
-      <form class="go big" autocomplete="off">
-        <input name="pr" placeholder="github.com/owner/repo/pull/123" aria-label="Pull request link" spellcheck="false" autofocus>
-        <button class="btn primary">Open</button>
-      </form>
-      <p class="hint">Odyssey takes a pull request one stop at a time, with the code next to each explanation, and lists anything the explanation skips.</p>
-      <div id="inbox"><p class="muted">Loading your pull requests…</p></div>
+      <section class="start">
+        <form class="go big" autocomplete="off">
+          <input name="pr" placeholder="Paste a pull request link: github.com/owner/repo/pull/123" aria-label="Pull request link" spellcheck="false" autofocus>
+          <button class="btn primary">Open</button>
+        </form>
+        <p class="hint">Odyssey turns a pull request into a guided tour: what it changes, how the pieces connect, and each step pinned to its code. <kbd>/</kbd> jumps here from anywhere.</p>
+      </section>
+      <section id="recent"></section>
+      <div class="lists" id="inbox">${['Waiting on your review', 'Your pull requests'].map((t) => `<section><h2>${t}</h2><ul class="prs">${'<li class="skel"><span></span></li>'.repeat(3)}</ul></section>`).join('')}</div>
     </div>`;
-    const box = () => $('#inbox');
+    refreshRecent();
     try {
       const { review, mine } = await api('/api/inbox');
-      const list = (title, items, empty) => `<h2>${title} <span class="muted">${items.length || ''}</span></h2>${items.length
-        ? `<ul class="prs">${items.map((p) => `<li><a href="#/${esc(p.ref)}">
-            <span class="repo">${esc(p.repo)}</span><span class="num">#${p.num}</span>
-            <span class="title">${esc(p.title)}${p.draft ? ' <span class="draft">Draft</span>' : ''}</span>
-            <span class="who">${esc(p.author)}</span><span class="when">${ago(p.updated)}</span></a></li>`).join('')}</ul>`
-        : `<p class="muted empty">${empty}</p>`}`;
-      if (box()) box().innerHTML = list('Review requested', review, 'Nothing waiting on you.') + list('Your pull requests', mine, 'No open pull requests.');
+      if ($('#inbox')) $('#inbox').innerHTML = prList('Waiting on your review', review, 'Nothing is waiting on your review.') + prList('Your pull requests', mine, 'You have no open pull requests.');
     } catch (e) {
-      if (box()) box().innerHTML = `<p class="muted">Couldn't list pull requests: ${esc(e.message)}</p>`;
+      if ($('#inbox')) $('#inbox').innerHTML = `<p class="muted">Couldn't list pull requests: ${esc(e.message)}</p>`;
     }
+  }
+
+  function prList(title, items, empty) {
+    return `<section><h2>${title} <span class="count">${items.length || ''}</span></h2>${items.length ? `<ul class="prs">${items.map((p) => {
+      const [label, tone] = p.draft ? ['Draft', 'muted'] : REVIEW[p.review] || ['', ''];
+      return `<li><a href="#/${esc(p.ref)}">
+        ${p.avatar ? `<img class="av" src="${esc(p.avatar)}" alt="" width="20" height="20" loading="lazy">` : '<span class="av"></span>'}
+        <span class="main"><span class="title">${esc(p.title)}</span><span class="sub">${esc(p.repo)} #${p.num} · ${esc(p.author)} · ${ago(p.updated)}${label ? ` · <span class="rv ${tone}">${label}</span>` : ''}</span></span>
+        <span class="side">${diffstat(p.add, p.del)}<span class="files">${plural(p.files, 'file')}</span></span>
+        <span class="tt ${p.tour ? 'ready' : p.reading ? 'busy' : ''}">${p.tour ? 'Tour ready' : p.reading ? 'Reading' : 'Not read'}</span>
+      </a></li>`;
+    }).join('')}</ul>` : `<p class="empty">${empty}</p>`}</section>`;
+  }
+
+  // Reads in progress and saved tours. Polls while something is being read, so finished reads move into the grid.
+  let recentTimer;
+  async function refreshRecent() {
+    clearTimeout(recentTimer);
+    if (!$('#recent')) return;
+    let r;
+    try { r = await api('/api/recent'); } catch { return; }
+    const box = $('#recent');
+    if (!box) return;
+    const reading = r.reading.length ? `<h2>Reading now</h2><ul class="reading">${r.reading.map((x) => `<li><a href="#/${esc(x.key)}">
+        <span class="pulse"></span><span class="k">${keyLabel(x.key)}</span><span class="title">${esc(x.title || '')}</span>
+        <span class="muted">${esc(pretty(x.model))}</span><span class="elapsed" data-since="${x.since}">${clock(Date.now() - x.since)}</span></a></li>`).join('')}</ul>` : '';
+    const cards = r.tours.map((t) => {
+      const d = new Set(store.get(`done:${t.key}@${t.sha}`, [])), n = t.stops;
+      return `<a class="card" href="#/${esc(t.key)}">
+        <div class="thumb">${t.flow?.nodes?.length ? flowMap(t.flow, n, true) : ''}</div>
+        <div class="card-body">
+          <p class="card-k">${keyLabel(t.key)}${t.state ? `<span class="state s-${esc(t.state)}">${STATE[t.state] || esc(t.state)}</span>` : ''}</p>
+          <h3>${esc(t.title || t.key)}</h3>
+          <p class="card-gist">${prose(t.gist)}</p>
+        </div>
+        <div class="card-foot">
+          <span class="pbar" aria-hidden="true"><i style="width:${n ? (d.size / n) * 100 : 0}%"></i></span>
+          <span>${d.size === n && n ? 'All stops understood' : `${d.size}/${n} understood`}</span>
+          <span class="muted">${esc(pretty(t.model))} · ${ago(t.at)}</span>
+        </div>
+      </a>`;
+    }).join('');
+    box.innerHTML = `${reading}<h2>Your tours <span class="count">${r.tours.length || ''}</span></h2>${cards
+      ? `<div class="cards">${cards}</div>`
+      : `<p class="empty">No tours yet. Open a pull request above and its tour is kept here. Try a public one: <a href="#/cli/cli/15002">cli/cli #15002</a>.</p>`}`;
+    if (r.reading.length) recentTimer = setTimeout(refreshRecent, 4000);
   }
 
   // ---------- PR ----------
@@ -155,7 +216,7 @@
     const { pr, story: s, serr } = cur;
     if (!s) return `<a class="row" data-sel="overview">Overview</a>
       ${serr ? `<p class="tour-msg bad">The tour couldn't be written.<br><button class="link" data-fresh>Try again</button></p>`
-        : `<p class="tour-msg">Reading ${plural(pr.files.length, 'file')} · <span class="elapsed">${clock(Date.now() - cur.t0)}</span></p><div class="bar-indef"></div>`}`;
+        : `<p class="tour-msg">Reading ${plural(pr.files.length, 'file')} · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></p><div class="bar-indef"></div>`}`;
     const d = done(), ix = index(pr), u = unread(pr, s);
     const size = (st) => st.hunks.reduce((n, id) => n + (ix.get(id)?.h.add || 0) + (ix.get(id)?.h.del || 0), 0);
     return `<a class="row" data-sel="overview">Overview</a>
@@ -184,7 +245,7 @@
   function bar() {
     const s = cur.story;
     if (!s) {
-      status.innerHTML = cur.serr ? `<span class="bad">${esc(cur.serr)}</span>` : `<span>Reading with ${esc(reader())} · <span class="elapsed">${clock(Date.now() - cur.t0)}</span></span>`;
+      status.innerHTML = cur.serr ? `<span class="bad">${esc(cur.serr)}</span>` : `<span>Reading with ${esc(reader())} · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></span>`;
       return;
     }
     const d = done(), n = s.stops.length, u = unread(cur.pr, s);
@@ -335,7 +396,7 @@
 
   // Layered left to right: break cycles, longest path from the sources, then one barycentre pass to cut crossings.
   // ponytail: no real crossing minimisation; fine for the 3–14 nodes the prompt asks for.
-  function flowMap(flow, nStops) {
+  function flowMap(flow, nStops, thumb) {
     const N = flow.nodes.slice(0, 24), at = new Map(N.map((n, i) => [n.id, i]));
     const E = flow.edges.filter((e) => at.has(e.from) && at.has(e.to) && e.from !== e.to).map((e) => ({ ...e, a: at.get(e.from), b: at.get(e.to) }));
     const seen = N.map(() => 0), out = N.map(() => []);
@@ -391,7 +452,7 @@
 
     const SL = { new: 'A', changed: 'M', removed: 'D' };
     const nodes = N.map((n, i) => {
-      const { x, y } = pos[i], st = n.stop >= 0 && n.stop < nStops ? n.stop : -1, l = SL[n.status];
+      const { x, y } = pos[i], st = !thumb && n.stop >= 0 && n.stop < nStops ? n.stop : -1, l = SL[n.status];
       return `<g class="node s-${esc(n.status)}${st >= 0 ? ' link' : ''}" data-node="${i}"${st >= 0 ? ` data-sel="${st}" tabindex="0" role="button" aria-label="${esc(n.label)}, stop ${st + 1}"` : ''} transform="translate(${x},${y})">
         <title>${esc(n.label)} — ${esc(n.where)}</title>
         <rect width="${W}" height="${H}" rx="4"/>
@@ -402,7 +463,7 @@
       </g>`;
     }).join('');
 
-    return `<svg viewBox="0 0 ${width} ${height}" style="width:100%;max-width:${width}px;min-width:${Math.round(width * 0.7)}px" role="img" aria-label="How the changed parts connect">
+    return `<svg viewBox="0 0 ${width} ${height}" ${thumb ? 'preserveAspectRatio="xMidYMid meet"' : `style="width:100%;max-width:${width}px;min-width:${Math.round(width * 0.7)}px"`} role="img" aria-label="How the changed parts connect">
       <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z"/></marker></defs>
       ${edges}${nodes}</svg>`;
   }
@@ -532,7 +593,7 @@
     store.set('theme', root.dataset.theme);
   });
 
-  setInterval(() => { if (cur && !cur.story) $$('.elapsed').forEach((el) => (el.textContent = clock(Date.now() - cur.t0))); }, 1000);
+  setInterval(() => $$('.elapsed[data-since]').forEach((el) => (el.textContent = clock(Date.now() - +el.dataset.since))), 1000);
 
   addEventListener('hashchange', route);
   route();

@@ -259,14 +259,26 @@ async function analyse(pr, cfg) {
   return { s: JSON.parse(text), model: j.model || cfg.model };
 }
 
+// Cache files are v<V>__<provider-model>__<owner>__<repo>__<num>__<sha12>.json: one tour per reader per commit.
+const tail = (ref, sha) => `__${ref.owner}__${ref.repo}__${ref.num}__${sha.slice(0, 12)}.json`;
+const whoOf = (cfg) => `${cfg.provider}-${cfg.model || 'default'}`.replace(/[^\w.-]+/g, '_');
+const tours = () => fs.readdirSync(CACHE).filter((f) => f.startsWith(`v${V}__`))
+  .map((f) => ({ f, t: fs.statSync(path.join(CACHE, f)).mtimeMs })).sort((a, b) => b.t - a.t);
+// The newest tour of this commit by any reader: switching models shouldn't throw away a tour you already have.
+const existing = (ref, sha) => { const hit = tours().find((x) => x.f.endsWith(tail(ref, sha))); return hit && path.join(CACHE, hit.f); };
+const readingOf = (ref, sha) => [...inflight.entries()].find(([f]) => f.endsWith(tail(ref, sha)))?.[1];
+
 async function story(ref, fresh) {
   const pr = await loadPR(ref);
   const cfg = settings();
-  // A different provider or model is a different reading, so it gets its own cache entry.
-  const who = `${cfg.provider}-${cfg.model || 'default'}`.replace(/[^\w.-]+/g, '_');
-  const file = path.join(CACHE, `v${V}__${who}__${ref.owner}__${ref.repo}__${ref.num}__${pr.sha.slice(0, 12)}.json`);
-  if (!fresh && fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (inflight.has(file)) return inflight.get(file);
+  const file = path.join(CACHE, `v${V}__${whoOf(cfg)}${tail(ref, pr.sha)}`);
+  if (!fresh) {
+    const hit = fs.existsSync(file) ? file : existing(ref, pr.sha);
+    if (hit) return JSON.parse(fs.readFileSync(hit, 'utf8'));
+    const busy = readingOf(ref, pr.sha); // already being read, perhaps by another model: wait for that
+    if (busy) return busy.job;
+  }
+  if (inflight.has(file)) return inflight.get(file).job;
   const job = (async () => {
     const t0 = Date.now();
     const { s, model } = await analyse(pr, cfg);
@@ -282,20 +294,52 @@ async function story(ref, fresh) {
       st.hunks = [...new Set([...st.hunks, ...st.points.map((pt) => pt.hunk)])].filter((id) => known.has(id));
     }
     for (const c of s.checks) if (!known.has(c.hunk)) c.hunk = '';
-    s.meta = { sha: pr.sha, provider: cfg.provider, model, ms: Date.now() - t0, at: new Date().toISOString() };
+    s.meta = { sha: pr.sha, provider: cfg.provider, model, ms: Date.now() - t0, at: new Date().toISOString(), ref: pr.ref, title: pr.title, state: pr.state };
     fs.writeFileSync(file, JSON.stringify(s));
     return s;
   })().finally(() => inflight.delete(file));
-  inflight.set(file, job);
+  inflight.set(file, { job, since: Date.now(), key: `${ref.owner}/${ref.repo}/${ref.num}`, title: pr.title, model: cfg.model || cfg.provider });
   return job;
 }
 
+// Home page: reads in progress and the latest tour of each PR, newest first.
+function recent() {
+  // Per PR, show the tour opening it would show: the current reader's if there is one, else the newest.
+  const mine = `v${V}__${whoOf(settings())}__`, best = new Map();
+  for (const { f } of tours()) {
+    const p = f.slice(0, -5).split('__'), key = `${p[2]}/${p.slice(3, -2).join('__')}/${p.at(-2)}`;
+    if (!best.has(key) || (f.startsWith(mine) && !best.get(key).startsWith(mine))) best.set(key, f);
+  }
+  const out = [];
+  for (const [key, f] of best) {
+    try {
+      const s = JSON.parse(fs.readFileSync(path.join(CACHE, f), 'utf8'));
+      out.push({ key, title: s.meta.title || null, state: s.meta.state || null, gist: s.gist, flow: s.flow, stops: s.stops.length, model: s.meta.model, sha: s.meta.sha, at: s.meta.at });
+    } catch {}
+    if (out.length >= 12) break;
+  }
+  const reading = [...inflight.values()].map(({ since, key, title, model }) => ({ key, since, title, model }));
+  return { tours: out, reading };
+}
+
+// One GraphQL search per list gets the size, review state and head commit that the REST search lacks.
+const SEARCH = `query($q: String!) { search(query: $q, type: ISSUE, first: 15) { nodes { ... on PullRequest {
+  number title isDraft updatedAt additions deletions changedFiles reviewDecision headRefOid
+  repository { nameWithOwner } author { login avatarUrl(size: 40) } } } } }`;
+
 async function inbox() {
-  const q = (s) => gh(`search/issues?per_page=15&sort=updated&q=${encodeURIComponent(`is:pr is:open archived:false ${s}`)}`)
-    .then((r) => r.items.map((x) => {
-      const repo = x.repository_url.split('/').slice(-2).join('/');
-      return { ref: `${repo}/${x.number}`, repo, num: x.number, title: x.title, author: x.user.login, draft: !!x.draft, updated: x.updated_at };
-    }));
+  const q = async (filter) => {
+    const r = JSON.parse(await run('gh', ['api', 'graphql', '-f', `query=${SEARCH}`, '-f', `q=is:pr is:open archived:false sort:updated-desc ${filter}`]));
+    return r.data.search.nodes.filter((n) => n.number).map((n) => {
+      const [owner, repo] = n.repository.nameWithOwner.split('/'), ref = { owner, repo, num: n.number };
+      return {
+        ref: `${n.repository.nameWithOwner}/${n.number}`, repo: n.repository.nameWithOwner, num: n.number, title: n.title,
+        author: n.author?.login || 'ghost', avatar: n.author?.avatarUrl || '', draft: n.isDraft, updated: n.updatedAt,
+        add: n.additions, del: n.deletions, files: n.changedFiles, review: n.reviewDecision,
+        tour: !!existing(ref, n.headRefOid), reading: !!readingOf(ref, n.headRefOid),
+      };
+    });
+  };
   const [review, mine] = await Promise.all([q('review-requested:@me'), q('author:@me')]);
   return { review, mine };
 }
@@ -335,10 +379,14 @@ http.createServer(async (req, res) => {
       return send(res, 200, fs.readFileSync(path.join(__dirname, f), 'utf8'), TYPES[f.split('.').pop()]);
     }
     if (u.pathname === '/api/inbox') return send(res, 200, await inbox());
+    if (u.pathname === '/api/recent') return send(res, 200, recent());
     if (u.pathname === '/api/pr' || u.pathname === '/api/story') {
       const ref = parseRef(u.searchParams.get('pr'));
       if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
-      return send(res, 200, u.pathname === '/api/pr' ? await loadPR(ref) : await story(ref, u.searchParams.has('fresh')));
+      if (u.pathname === '/api/story') return send(res, 200, await story(ref, u.searchParams.has('fresh')));
+      const pr = await loadPR(ref);
+      pr.reading = readingOf(ref, pr.sha)?.since || null; // so a page that comes back mid-read shows the real elapsed time
+      return send(res, 200, pr);
     }
     send(res, 404, { error: 'not found' });
   } catch (e) {
