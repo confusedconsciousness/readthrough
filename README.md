@@ -6,6 +6,8 @@ Paste a GitHub PR link. Odyssey opens it in three panes: the list of stops, the 
 
 - **Overview:** the gist, the why, and the before → after of the change's behaviour. Next to it, a map of the functions, routes, and tables the PR touches, with arrows for which way calls and data go (git colours: A added, M modified, D deleted), plus every file with the stops that explain it.
 - **Stops:** the diff split into stops, in the order the code runs. Each stop is one plain sentence, then 2–5 numbered steps. Each step is pinned to the exact lines it describes: the same number marks them in the code gutter, and hovering or clicking a step lights up its lines. Each stop also has one thing to **verify** yourself. Mark each stop understood; the status bar tracks progress.
+- **Since last tour:** when a PR you've toured gets new commits, opening it lands here: the new commits and the diff of only those commits, shown straight away from GitHub, then a short explanation of what they change once the read finishes. If the branch was rebased or force-pushed, there's no clean diff of the new work, and the view says so.
+- **Does it do what was asked?** Each requirement from the PR's linked GitHub issues (or from its description when no issue is linked) is marked met, partly met, missing or unclear, with the code that shows it. Jira links aren't followed yet.
 - **Unexplained:** any hunk no stop covers. Odyssey computes this itself, without the model, so nothing in the diff gets skipped quietly.
 - **Before merging:** concrete risks, each linked to its hunk, and questions to ask the author.
 - **From the file list:** facts worked out from file names with no AI involved: no test changes, dependency, migration, CI, or config changes, deleted files, and generated files that were skipped.
@@ -36,7 +38,7 @@ The API only answers this page. Requests from other sites are refused, so a webp
 
 Tours are kept in `.cache/`, one per reader per commit. Opening a PR shows any tour of its current commit, whichever model wrote it. A PR is read again only when it gets new commits, or when you press **Re-read**, which uses the model currently selected. A read keeps running if you leave the page, and coming back picks it up where it is.
 
-The home page lists reads in progress, your tours (with their flow map and how many stops you've marked understood), and your open PRs and review requests, each with its size, review state and whether a tour is ready.
+The home page lists reads in progress, your tours (with their flow map and how many stops you've marked understood), and your open PRs and review requests, each with its size, review state, a 1–5 review-effort score (from size alone, no AI) and whether a tour is ready. **Smallest first** sorts by effort.
 
 Keys: `j`/`k` move between stops, `x` marks the current stop understood, `/` opens another PR. Each stop has its own URL (`#/owner/repo/123/2`).
 

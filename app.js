@@ -43,7 +43,8 @@
   const delta = (a, d) => `<span class="up">+${a}</span> <span class="down">−${d}</span>`;
   const LETTER = { added: 'A', modified: 'M', removed: 'D', renamed: 'R', copied: 'C', changed: 'M' };
 
-  const index = (pr) => pr._ix || (pr._ix = new Map(pr.files.flatMap((f) => f.hunks.map((h) => [h.id, { f, h }]))));
+  const index = (pr) => pr._ix || (pr._ix = new Map([...pr.files, ...(pr.since?.files || [])].flatMap((f) => f.hunks.map((h) => [h.id, { f, h }]))));
+  const hasSince = (pr) => !!(pr?.since && (pr.since.rewritten || pr.since.commits.length));
   const loc = (id, row) => {
     const x = cur?.pr && index(cur.pr).get(id);
     if (!x) return id;
@@ -69,7 +70,7 @@
   function parse() {
     const m = location.hash.match(/^#\/([\w.-]+)\/([\w.-]+)\/(\d+)(?:\/(\w+))?/);
     if (!m) return null;
-    return { key: `${m[1]}/${m[2]}/${m[3]}`, sel: !m[4] ? 'overview' : /^\d+$/.test(m[4]) ? +m[4] - 1 : m[4] };
+    return { key: `${m[1]}/${m[2]}/${m[3]}`, sel: !m[4] ? 'auto' : /^\d+$/.test(m[4]) ? +m[4] - 1 : m[4] };
   }
 
   function route() {
@@ -84,15 +85,16 @@
   function select(sel) {
     if (!cur) return;
     cur.sel = sel;
-    history.replaceState(null, '', `#/${cur.key}${sel === 'overview' ? '' : '/' + (typeof sel === 'number' ? sel + 1 : sel)}`);
+    history.replaceState(null, '', `#/${cur.key}${sel === 'overview' && !hasSince(cur.pr) ? '' : '/' + (typeof sel === 'number' ? sel + 1 : sel)}`);
     show();
   }
 
   function order() {
-    const s = cur?.story;
-    if (!s) return ['overview'];
-    return ['overview', ...s.stops.map((_, i) => i), ...(unread(cur.pr, s).hunks.length ? ['unread'] : []), 'merge'];
+    const s = cur?.story, first = [...(hasSince(cur?.pr) ? ['since'] : []), 'overview'];
+    if (!s) return first;
+    return [...first, ...s.stops.map((_, i) => i), ...(hasIntent(s) ? ['intent'] : []), ...(unread(cur.pr, s).hunks.length ? ['unread'] : []), 'merge'];
   }
+  const hasIntent = (s) => s?.intent && s.intent.source !== 'none' && s.intent.verdict !== 'none';
   const step = (d) => { const o = order(), i = o.indexOf(cur.sel); select(o[Math.max(0, Math.min(o.length - 1, (i < 0 ? 0 : i) + d))]); };
 
   // One entry per PR for this page's lifetime: leaving a PR mid-read and coming back joins the same read
@@ -109,6 +111,14 @@
     m.prP.then((pr) => { if (c === cur) { c.pr = pr; c.t0 = m.t0; render(); } }, (e) => { m.prP = null; if (c === cur) { c.err = e.message; render(); } });
     m.storyP.then((st) => { if (c === cur) { c.story = st; render(); } else if (!cur) refreshRecent(); }, (e) => { m.storyP = null; if (c === cur) { c.serr = e.message; render(); } });
   }
+
+  const VERDICT = { done: ['Does what was asked', 'ok', 'Yes'], partly: ['Partly does what was asked', 'warn', 'Partly'], not: ["Doesn't do what was asked", 'bad', 'No'], unclear: ["Can't tell from the diff", 'muted', '?'] };
+  const STATUS = { met: ['Met', 'ok', '✓'], partial: ['Partly', 'warn', '◐'], missing: ['Missing', 'bad', '✕'], unclear: ['Unclear', 'muted', '?'] };
+
+  // Review effort 1–5 from size alone, so it's there before any read. Thresholds are rough reading-time buckets.
+  const EFFORT = ['', 'Quick', 'Small', 'Medium', 'Large', 'Very large'];
+  const effort = (add, del, files) => { const n = add + del; return n <= 20 && files <= 2 ? 1 : n <= 120 && files <= 6 ? 2 : n <= 400 && files <= 15 ? 3 : n <= 1200 && files <= 40 ? 4 : 5; };
+  const effortChip = (e) => `<span class="eff e${e}" title="Review effort ${e} of 5, from the size of the change"><span class="pips" aria-hidden="true">${'<i></i>'.repeat(5)}</span>${EFFORT[e]}</span>`;
 
   // ---------- home ----------
 
@@ -139,11 +149,19 @@
     </div>`;
     refreshRecent();
     try {
-      const { review, mine } = await api('/api/inbox');
-      if ($('#inbox')) $('#inbox').innerHTML = prList('Waiting on your review', review, 'Nothing is waiting on your review.') + prList('Your pull requests', mine, 'You have no open pull requests.');
+      inbox = await api('/api/inbox');
+      lists();
     } catch (e) {
       if ($('#inbox')) $('#inbox').innerHTML = `<p class="muted">Couldn't list pull requests: ${esc(e.message)}</p>`;
     }
+  }
+
+  let inbox = null;
+  function lists() {
+    if (!inbox || !$('#inbox')) return;
+    const by = store.get('sort', 'recent'), sorted = (a) => (by === 'effort' ? [...a].sort((x, y) => effort(x.add, x.del, x.files) - effort(y.add, y.del, y.files) || x.add + x.del - (y.add + y.del)) : a);
+    $('#inbox').innerHTML = `<div class="lists-head"><span class="muted">Sort</span><span class="seg-btns">${[['recent', 'Recent'], ['effort', 'Smallest first']].map(([k, l]) => `<button data-sort="${k}" class="${by === k ? 'on' : ''}" aria-pressed="${by === k}">${l}</button>`).join('')}</span></div>`
+      + prList('Waiting on your review', sorted(inbox.review), 'Nothing is waiting on your review.') + prList('Your pull requests', sorted(inbox.mine), 'You have no open pull requests.');
   }
 
   function prList(title, items, empty) {
@@ -152,7 +170,7 @@
       return `<li><a href="#/${esc(p.ref)}">
         ${p.avatar ? `<img class="av" src="${esc(p.avatar)}" alt="" width="20" height="20" loading="lazy">` : '<span class="av"></span>'}
         <span class="main"><span class="title">${esc(p.title)}</span><span class="sub">${esc(p.repo)} #${p.num} · ${esc(p.author)} · ${ago(p.updated)}${label ? ` · <span class="rv ${tone}">${label}</span>` : ''}</span></span>
-        <span class="side">${diffstat(p.add, p.del)}<span class="files">${plural(p.files, 'file')}</span></span>
+        <span class="side">${diffstat(p.add, p.del)}<span class="files">${plural(p.files, 'file')} · ${effortChip(effort(p.add, p.del, p.files))}</span></span>
         <span class="tt ${p.tour ? 'ready' : p.reading ? 'busy' : ''}">${p.tour ? 'Tour ready' : p.reading ? 'Reading' : 'Not read'}</span>
       </a></li>`;
     }).join('')}</ul>` : `<p class="empty">${empty}</p>`}</section>`;
@@ -214,15 +232,17 @@
 
   function tour() {
     const { pr, story: s, serr } = cur;
-    if (!s) return `<a class="row" data-sel="overview">Overview</a>
+    const sinceRow = hasSince(pr) ? `<a class="row" data-sel="since">Since last tour<span class="c new">${pr.since.rewritten ? 'rebased' : `${pr.since.commits.length} new`}</span></a>` : '';
+    if (!s) return `${sinceRow}<a class="row" data-sel="overview">Overview</a>
       ${serr ? `<p class="tour-msg bad">The tour couldn't be written.<br><button class="link" data-fresh>Try again</button></p>`
         : `<p class="tour-msg">Reading ${plural(pr.files.length, 'file')} · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></p><div class="bar-indef"></div>`}`;
     const d = done(), ix = index(pr), u = unread(pr, s);
     const size = (st) => st.hunks.reduce((n, id) => n + (ix.get(id)?.h.add || 0) + (ix.get(id)?.h.del || 0), 0);
-    return `<a class="row" data-sel="overview">Overview</a>
+    return `${sinceRow}<a class="row" data-sel="overview">Overview</a>
       <p class="group">Stops</p>
       ${s.stops.map((st, i) => `<a class="row stop${d.has(i) ? ' done' : ''}" data-sel="${i}"><span class="mark" aria-hidden="true"></span><span class="n">${i + 1}</span><span class="t">${esc(st.title)}</span><span class="c" title="lines changed">${size(st) || ''}</span></a>`).join('')}
       <p class="group">Check</p>
+      ${hasIntent(s) ? `<a class="row" data-sel="intent">Does it do what was asked?<span class="c ${VERDICT[s.intent.verdict]?.[1] || ''}">${VERDICT[s.intent.verdict]?.[2] || ''}</span></a>` : ''}
       ${u.hunks.length || u.files.length ? `<a class="row" data-sel="unread">Unexplained<span class="c warn">${u.hunks.length + u.files.length}</span></a>` : ''}
       <a class="row" data-sel="merge">Before merging<span class="c">${s.checks.length || ''}</span></a>`;
   }
@@ -231,9 +251,11 @@
   function show() {
     if (!cur?.pr || !$('#note')) return;
     const { pr, story: s } = cur;
-    // Until the tour arrives the overview stands in, but cur.sel keeps the deep link.
-    const sel = !s || (typeof cur.sel === 'number' && !s.stops[cur.sel]) ? 'overview' : cur.sel;
-    const [note, code] = s ? pane(sel) : waiting();
+    if (cur.sel === 'auto') cur.sel = hasSince(pr) ? 'since' : 'overview';
+    // Until the tour arrives the overview stands in, but cur.sel keeps the deep link. The since view needs only the PR.
+    let sel = cur.sel;
+    if (sel === 'since' ? !hasSince(pr) : !s || (typeof sel === 'number' && !s.stops[sel]) || (sel === 'intent' && !hasIntent(s))) sel = 'overview';
+    const [note, code] = sel === 'since' ? sincePane() : s ? pane(sel) : waiting();
     $('#note').innerHTML = note;
     $('#code').innerHTML = code;
     $('#note').scrollTop = $('#code').scrollTop = 0;
@@ -267,7 +289,7 @@
 
   function heading(pr) {
     return `<h1 class="title">${esc(pr.title)}</h1>
-      <p class="byline">${esc(pr.author)} · <code>${esc(pr.head)}</code> → <code>${esc(pr.base)}</code><br>${plural(pr.files.length, 'file')} · ${delta(pr.add, pr.del)} · ${plural(pr.commits.length, 'commit')}</p>`;
+      <p class="byline">${esc(pr.author)} · <code>${esc(pr.head)}</code> → <code>${esc(pr.base)}</code><br>${plural(pr.files.length, 'file')} · ${delta(pr.add, pr.del)} · ${plural(pr.commits.length, 'commit')} · ${effortChip(effort(pr.add, pr.del, pr.files.length))}</p>`;
   }
 
   function facts(pr) {
@@ -281,7 +303,9 @@
     const { pr, story: s } = cur, d = done(), u = unread(pr, s), n = s.stops.length;
     if (sel === 'overview') return [
       `${heading(pr)}
+       ${hasSince(pr) ? `<a class="banner" data-sel="since"><b>${pr.since.rewritten ? 'Rebased' : plural(pr.since.commits.length, 'new commit')}</b> since the last tour${pr.since.at ? `, ${ago(pr.since.at)} ago` : ''}<span>See what changed →</span></a>` : ''}
        <p class="lead">${prose(s.gist)}</p>
+       ${hasIntent(s) ? `<p class="asked"><a data-sel="intent" class="verdict ${VERDICT[s.intent.verdict][1]}">${VERDICT[s.intent.verdict][0]}</a> <span class="muted">· ${s.intent.items.filter((r) => r.status === 'met').length} of ${s.intent.items.length} requirements met, from ${s.intent.source === 'issue' ? 'the linked issue' : 'the description'}</span></p>` : ''}
        <h2>Why</h2><p>${prose(s.why)}</p>
        ${s.changes.length ? `<h2>Behaviour</h2><table class="changes"><thead><tr><th>Before</th><th>After</th></tr></thead><tbody>${s.changes.map((c) => `<tr><td>${prose(c.before)}</td><td>${prose(c.after)}</td></tr>`).join('')}</tbody></table>` : ''}
        ${facts(pr)}${desc(pr)}
@@ -304,22 +328,69 @@
        ${u.files.length ? `<h2>No diff available</h2><ul class="plain">${u.files.map((f) => `<li><code>${esc(f.path)}</code></li>`).join('')}</ul>` : ''}`,
       u.hunks.map((id) => hunkById(pr, id)).join('') || `<p class="code-empty">Nothing here.</p>`,
     ];
-    const st = s.stops[sel];
-    // Points are numbered in reading order; the same numbers mark their rows in the code pane.
-    const pts = (st.points || []).map((pt, k) => ({ ...pt, k: k + 1 }));
-    const marks = (id) => pts.filter((pt) => pt.hunk === id);
-    const shown = [...new Set([...pts.map((pt) => pt.hunk).filter(Boolean), ...st.hunks])];
+    if (sel === 'intent') return intentPane();
+    const st = s.stops[sel], pts = numbered(st.points);
     return [
       `<p class="kicker">Stop ${sel + 1} of ${n}</p>
        <h1 class="title">${esc(st.title)}</h1>
        <p class="lead">${prose(st.summary ?? st.story)}</p>
-       ${pts.length ? `<ol class="points">${pts.map((pt) => `<li${pt.hunk ? ` data-pt="${pt.k}" tabindex="0"` : ''}><span class="pn">${pt.k}</span><span class="pt-t">${prose(pt.text)}</span>${pt.hunk ? `<span class="pt-at">${esc(loc(pt.hunk, pt.from))}</span>` : ''}</li>`).join('')}</ol>` : ''}
+       ${pointList(pts)}
        ${st.check ? `<div class="verify"><b>Verify</b><p>${prose(st.check)}</p></div>` : ''}
        <div class="actions">
          <button class="btn${d.has(sel) ? ' on' : ''}" data-ack="${sel}" aria-pressed="${d.has(sel)}"><span class="tick" aria-hidden="true"></span>${d.has(sel) ? 'Understood' : 'Mark understood'} <kbd>x</kbd></button>
          <button class="btn" data-step="1">Next <kbd>j</kbd></button>
        </div>`,
-      shown.map((id) => hunkById(pr, id, marks(id))).join('') || `<p class="code-empty">This stop has no code of its own.</p>`,
+      codeFor(pr, pts, st.hunks) || `<p class="code-empty">This stop has no code of its own.</p>`,
+    ];
+  }
+
+  // Points are numbered in reading order; the same numbers mark their rows in the code pane.
+  const numbered = (points) => (points || []).map((pt, k) => ({ ...pt, k: k + 1 }));
+  const pointList = (pts) => (pts.length ? `<ol class="points">${pts.map((pt) => `<li${pt.hunk ? ` data-pt="${pt.k}" tabindex="0"` : ''}><span class="pn">${pt.k}</span><span class="pt-t">${prose(pt.text)}</span>${pt.hunk ? `<span class="pt-at">${esc(loc(pt.hunk, pt.from))}</span>` : ''}</li>`).join('')}</ol>` : '');
+  const codeFor = (pr, pts, ids) => [...new Set([...pts.map((pt) => pt.hunk).filter(Boolean), ...ids])].map((id) => hunkById(pr, id, pts.filter((pt) => pt.hunk === id))).join('');
+
+  // Only the commits pushed since the last tour. The diff comes straight from GitHub, so it shows before any read.
+  function sincePane() {
+    const { pr, story: s } = cur, d = pr.since, when = d.at ? `${ago(d.at)} ago` : 'earlier';
+    if (d.rewritten) return [
+      `<p class="kicker">Since the last tour · ${when}</p>
+       <h1 class="title">The branch was rebased</h1>
+       <p>The last tour covered commit <code>${esc(d.sha.slice(0, 7))}</code>. Since then the branch was rebased or force-pushed, so there is no clean diff of only the new work.</p>
+       <p>The tour you're reading covers the whole PR as it is now.</p>
+       <div class="actions"><button class="btn primary" data-sel="overview">Go to the tour <kbd>j</kbd></button></div>`,
+      `<p class="code-empty">No separate diff to show.</p>`,
+    ];
+    const sum = s?.since && (s.since.summary || s.since.points.length) ? s.since : null, pts = numbered(sum?.points);
+    return [
+      `<p class="kicker">Since the last tour · ${when}</p>
+       <h1 class="title">${plural(d.commits.length, 'new commit')}</h1>
+       ${sum ? `<p class="lead">${prose(sum.summary)}</p>${pointList(pts)}`
+        : s ? `<p class="muted">This tour was written without the earlier one to compare against. The new commits' diff is on the right; Re-read to have it explained.</p>`
+        : `<p class="muted">The explanation arrives with the tour. The diff of only the new commits is already on the right.</p>`}
+       <h2>Commits</h2><ul class="commits">${d.commits.map((c) => `<li><code>${esc(c.sha)}</code><span>${esc(c.msg)}</span><span class="muted">${esc(c.author)}</span></li>`).join('')}</ul>
+       <p class="small"><a href="${esc(d.compare)}" target="_blank" rel="noopener">Compare on GitHub ↗</a></p>
+       <div class="actions"><button class="btn primary" data-sel="overview">Go to the full tour <kbd>j</kbd></button></div>`,
+      (codeFor(pr, pts, d.files.flatMap((f) => f.hunks.map((h) => h.id))) + d.files.filter((f) => f.generated || f.nodiff).map((f) => fileHunks(pr, f)).join('')) || `<p class="code-empty">No file changes.</p>`,
+    ];
+  }
+
+  // The requirements the PR was asked to meet (linked issues, else the description), each with its evidence.
+  function intentPane() {
+    const { pr, story: s } = cur, it = s.intent, [label, tone] = VERDICT[it.verdict] || ['', ''];
+    const src = it.source === 'issue' && pr.issues?.length
+      ? `Checked against ${pr.issues.map((i) => `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.ref)}</a> ${esc(i.title)}`).join('; ')}.`
+      : it.source === 'issue' ? 'Checked against the linked issue.' : 'There is no linked issue, so this is checked against the PR description.';
+    return [
+      `<p class="kicker">Check</p>
+       <h1 class="title">Does it do what was asked?</h1>
+       <p class="verdict-big ${tone}">${label}</p>
+       <p class="lead">${prose(it.summary)}</p>
+       <p class="small muted">${src}</p>
+       <ul class="reqs">${it.items.map((r) => {
+         const [l, t, g] = STATUS[r.status] || ['', '', ''];
+         return `<li class="${t}"><span class="ri" aria-hidden="true">${g}</span><div><p class="rq">${prose(r.requirement)} <span class="rs">${l}</span></p><p class="re">${prose(r.evidence)}</p>${r.hunk ? `<a class="loc" data-hunk="${esc(r.hunk)}">${esc(loc(r.hunk))}</a>` : ''}</div></li>`;
+       }).join('')}</ul>`,
+      codeFor(pr, [], [...new Set(it.items.map((r) => r.hunk).filter(Boolean))]) || `<p class="code-empty">No code is tied to these.</p>`,
     ];
   }
 
@@ -353,7 +424,7 @@
       return `<tr${cls ? ` class="${cls}"` : ''}${on.length ? ` data-pts="${on.map((m) => m.k).join(' ')}"` : ''}><td class="pg">${first ? `<span class="pb" data-pt="${first.k}">${first.k}</span>` : ''}</td><td class="ln">${o ?? ''}</td><td class="ln">${n ?? ''}</td><td class="sg">${s === ' ' ? '' : s === '-' ? '−' : '+'}</td><td class="tx">${esc(t)}</td></tr>`;
     }).join('');
     return `<div class="hunk${marks.length ? ' marked' : ''}" id="h-${h.id}">
-      <div class="hh"><span class="st st-${L}" title="${esc(f.status)}">${L}</span><a class="p" href="${esc(pr.url)}/files#${f.anchor}" target="_blank" rel="noopener" title="Open on GitHub">${pathHtml(f.path)}</a><span class="at">${h.at ? esc(h.at) : `line ${h.start}`}</span><span class="n">${delta(h.add, h.del)}</span></div>
+      <div class="hh"><span class="st st-${L}" title="${esc(f.status)}">${L}</span><a class="p" href="${esc(h.id[0] === 'd' && pr.since ? pr.since.compare : `${pr.url}/files`)}#${f.anchor}" target="_blank" rel="noopener" title="Open on GitHub">${pathHtml(f.path)}</a><span class="at">${h.at ? esc(h.at) : `line ${h.start}`}</span><span class="n">${delta(h.add, h.del)}</span></div>
       <div class="scroll"><table class="diff"><tbody>${rows}</tbody></table></div>
       ${long ? `<button class="expand" data-expand>${h.lines.length - MAX} more lines</button>` : ''}
     </div>`;
@@ -536,10 +607,11 @@
   document.addEventListener('input', (e) => e.target.setCustomValidity?.(''));
 
   document.addEventListener('click', (e) => {
-    const t = e.target.closest('[data-settings],[data-pt],[data-sel],[data-hunk],[data-ack],[data-step],[data-expand],[data-fresh]');
+    const t = e.target.closest('[data-sort],[data-settings],[data-pt],[data-sel],[data-hunk],[data-ack],[data-step],[data-expand],[data-fresh]');
     if (!t) return;
     const ds = t.dataset;
-    if ('settings' in ds) openSettings();
+    if (ds.sort) { store.set('sort', ds.sort); lists(); }
+    else if ('settings' in ds) openSettings();
     else if (ds.pt) { point(ds.pt, true); if (t.matches('.pb')) $(`.points [data-pt="${ds.pt}"]`)?.scrollIntoView({ block: 'nearest' }); }
     else if (ds.sel != null) { e.preventDefault(); select(/^\d+$/.test(ds.sel) ? +ds.sel : ds.sel); }
     else if (ds.hunk) { e.preventDefault(); reveal(ds.hunk); }
@@ -604,5 +676,6 @@
   console.assert(refOf('a/b#3') === 'a/b/3' && refOf('a/b') === null, 'refOf short');
   console.assert(prose('use `x<y`') === 'use <code>x&lt;y</code>', 'prose escapes');
   console.assert(clock(72000) === '1:12', 'clock');
+  console.assert(effort(5, 3, 1) === 1 && effort(88, 22, 5) === 2 && effort(300, 50, 10) === 3 && effort(3932, 232, 27) === 5, 'effort');
   console.assert(pretty('claude-sonnet-5-5') === 'Sonnet 5.5' && pretty('gpt-x') === 'gpt-x', 'pretty');
 })();
