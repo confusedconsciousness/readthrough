@@ -1,4 +1,4 @@
-// Odyssey server: the app, GitHub sign-in, and the JSON API.
+// Readthrough server: the app, GitHub sign-in, and the JSON API.
 // Hosted mode (GITHUB_CLIENT_ID set): people sign in through the GitHub App and bring their own AI key.
 // Local mode: one person, GitHub through the `gh` CLI, and the Claude Code / Codex CLIs on this machine allowed.
 const http = require('node:http');
@@ -17,22 +17,25 @@ const MODE = process.env.GITHUB_CLIENT_ID ? 'hosted' : 'local';
 const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
 const HOST = process.env.HOST || (MODE === 'hosted' ? '0.0.0.0' : '127.0.0.1');
 const SECURE = PUBLIC_URL.startsWith('https://');
-const ALLOWED = (process.env.ODYSSEY_ALLOWED_ORGS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+// Settings are READTHROUGH_*; the ODYSSEY_* names from before the rename still work.
+const env = (k) => process.env[`READTHROUGH_${k}`] ?? process.env[`ODYSSEY_${k}`];
+const ALLOWED = (env('ALLOWED_ORGS') || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const APP_SLUG = process.env.GITHUB_APP_SLUG || '';
 
-function fail(msg) { console.error(`odyssey: ${msg}`); process.exit(1); }
-// Postgres when DATABASE_URL is set; otherwise SQLite in one file (default ./odyssey.db).
-const SQLITE = process.env.ODYSSEY_SQLITE || path.join(__dirname, 'odyssey.db');
+function fail(msg) { console.error(`readthrough: ${msg}`); process.exit(1); }
+// Postgres when DATABASE_URL is set; otherwise SQLite in one file (default ./readthrough.db, or an existing ./odyssey.db).
+const kept = (now, before) => (fs.existsSync(path.join(__dirname, before)) ? path.join(__dirname, before) : path.join(__dirname, now));
+const SQLITE = env('SQLITE') || kept('readthrough.db', 'odyssey.db');
 if (MODE === 'hosted') {
   if (!process.env.GITHUB_CLIENT_SECRET) fail('hosted mode needs GITHUB_CLIENT_SECRET from your GitHub App.');
-  if (!process.env.PUBLIC_URL) fail('hosted mode needs PUBLIC_URL, e.g. https://odyssey.example.com');
-  if ((process.env.ODYSSEY_SECRET || '').length < 32) fail('hosted mode needs ODYSSEY_SECRET, 32+ random characters (openssl rand -base64 48).');
+  if (!process.env.PUBLIC_URL) fail('hosted mode needs PUBLIC_URL, e.g. https://readthrough.example.com');
+  if ((env('SECRET') || '').length < 32) fail('hosted mode needs READTHROUGH_SECRET, 32+ random characters (openssl rand -base64 48).');
 }
 
 // Locally the sealing secret is generated once and kept next to the app, readable only by you.
 function secret() {
-  if (process.env.ODYSSEY_SECRET) return process.env.ODYSSEY_SECRET;
-  const f = path.join(__dirname, '.odyssey-secret');
+  if (env('SECRET')) return env('SECRET');
+  const f = kept('.readthrough-secret', '.odyssey-secret'); // an existing secret must be kept, or saved keys can't be read
   if (!fs.existsSync(f)) fs.writeFileSync(f, crypto.randomBytes(48).toString('base64'), { mode: 0o600 });
   return fs.readFileSync(f, 'utf8').trim();
 }
@@ -207,7 +210,7 @@ async function saveSettings(user, b) {
     let u;
     try { u = new URL(baseURL); } catch {}
     if (!u || !['https:', 'http:'].includes(u.protocol)) throw new Error('Base URL must start with https://');
-    if (MODE === 'hosted' && u.protocol !== 'https:') throw new Error('Base URL must use https:// on a hosted Odyssey.');
+    if (MODE === 'hosted' && u.protocol !== 'https:') throw new Error('Base URL must use https:// on a hosted Readthrough.');
   }
   const key = typeof b.key === 'string' ? b.key.trim() : '';
   if (key.length > 500) throw new Error('That key is too long.');
@@ -347,15 +350,17 @@ async function story(ctx, ref, fresh) {
 }
 
 // Home page: this user's reads in progress, and the latest tour of each PR they've opened.
-async function recent(ctx) {
+const PER_PAGE = 6; // about one screen of tours in every home layout
+async function recent(ctx, params) {
   const cfg = await aiConfig(ctx.user);
-  const rows = await db.recentTours(ctx.user.id, readerOf(cfg));
+  const text = String(params.get('q') || '').slice(0, 200), page = Math.min(Math.max(0, parseInt(params.get('page'), 10) || 0), 1000);
+  const { total, rows } = await db.recentTours(ctx.user.id, readerOf(cfg), { q: text, limit: PER_PAGE, offset: page * PER_PAGE });
   const tours = rows.map((r) => {
     const s = r.data;
     return { key: `${r.owner}/${r.repo}/${r.num}`, title: s.meta.title || null, state: s.meta.state || null, gist: s.gist, flow: s.flow, stops: s.stops.length, model: s.meta.model, sha: s.meta.sha, at: s.meta.at, rec: s.review?.recommendation || null };
   });
   const reading = [...inflight.values()].filter((x) => x.by === ctx.user.id).map(({ since, key, title, model }) => ({ key, since, title, model }));
-  return { tours, reading };
+  return { tours, reading, total, page, per: PER_PAGE };
 }
 
 // One GraphQL search per list gets the size, review state and head commit that the REST search lacks.
@@ -404,7 +409,7 @@ let localUser = null;
 async function context(req) {
   if (MODE === 'local') {
     const token = await localToken();
-    localUser ||= gh(token, 'user').then(db.upsertUser).then(async (u) => { await importCache(u).catch((e) => console.error(`odyssey: import failed: ${e.message}`)); return u; });
+    localUser ||= gh(token, 'user').then(db.upsertUser).then(async (u) => { await importCache(u).catch((e) => console.error(`readthrough: import failed: ${e.message}`)); return u; });
     localUser.catch(() => { localUser = null; });
     return { user: await localUser, token };
   }
@@ -425,10 +430,10 @@ async function importCache(user) {
       await db.putTour(ref, s.meta.sha, p[1], s, user.id);
       await db.markOpened(user.id, ref);
       n++;
-    } catch (e) { console.error(`odyssey: skipped ${f}: ${e.message}`); }
+    } catch (e) { console.error(`readthrough: skipped ${f}: ${e.message}`); }
   }
   fs.renameSync(dir, `${dir}.imported`);
-  console.log(`odyssey: imported ${n} tours from .cache/ (kept in .cache.imported/)`);
+  console.log(`readthrough: imported ${n} tours from .cache/ (kept in .cache.imported/)`);
 }
 
 // ---------- http ----------
@@ -468,7 +473,7 @@ function body(req) {
 }
 
 const page = (title, text) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
-<link rel="stylesheet" href="/styles.css"><div class="empty-state"><h1>${title}</h1><p>${text}</p><p><a href="/">Back to Odyssey</a></p></div>`;
+<link rel="stylesheet" href="/styles.css"><div class="empty-state"><h1>${title}</h1><p>${text}</p><p><a href="/">Back to Readthrough</a></p></div>`;
 const escHTML = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 async function signIn(req, res, u) {
@@ -481,7 +486,7 @@ async function signIn(req, res, u) {
     if (ALLOWED.length) {
       const { installations = [] } = await gh(tokens.access, 'user/installations');
       if (!installations.some((i) => ALLOWED.includes(i.account.login.toLowerCase()))) {
-        return send(res, 403, page('Not on the list', `This Odyssey is for members of ${escHTML(ALLOWED.join(', '))}. Your GitHub account, ${escHTML(me.login)}, doesn't have access to any of them through Odyssey's GitHub App.`), TYPES.html);
+        return send(res, 403, page('Not on the list', `This Readthrough is for members of ${escHTML(ALLOWED.join(', '))}. Your GitHub account, ${escHTML(me.login)}, doesn't have access to any of them through Readthrough's GitHub App.`), TYPES.html);
       }
     }
     const user = await db.upsertUser(me, tokens);
@@ -537,7 +542,7 @@ async function handle(req, res) {
   }
   if (req.method !== 'GET') return send(res, 405, { error: 'GET only' });
   if (u.pathname === '/api/inbox') return send(res, 200, await inbox(ctx));
-  if (u.pathname === '/api/recent') return send(res, 200, await recent(ctx));
+  if (u.pathname === '/api/recent') return send(res, 200, await recent(ctx, u.searchParams));
   if (u.pathname === '/api/pr' || u.pathname === '/api/story') {
     const ref = parseRef(u.searchParams.get('pr'));
     if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
@@ -555,12 +560,12 @@ db.init({ url: process.env.DATABASE_URL, file: SQLITE, secret: secret() }).then(
     if (!res.headersSent) send(res, e.status === 401 || e.status === 404 ? e.status : 502, { error: e.message });
     else res.end();
   })).listen(PORT, HOST, () => {
-    console.log(`odyssey (${MODE} mode, ${where}) on ${PUBLIC_URL}`);
-    if (store === 'sqlite' && MODE === 'hosted') console.log('odyssey: SQLite suits one server; keep the file on a persistent volume, or set DATABASE_URL for Postgres.');
+    console.log(`readthrough (${MODE} mode, ${where}) on ${PUBLIC_URL}`);
+    if (store === 'sqlite' && MODE === 'hosted') console.log('readthrough: SQLite suits one server; keep the file on a persistent volume, or set DATABASE_URL for Postgres.');
   });
   setInterval(() => db.pruneSessions().catch(() => {}), 6 * 3600_000).unref();
 }, (e) => fail(process.env.DATABASE_URL
-  ? `couldn't reach Postgres at DATABASE_URL (${e.message}). Fix the URL or start the database; Odyssey won't switch to SQLite on its own, since that would split your data. Unset DATABASE_URL to use SQLite on purpose.`
+  ? `couldn't reach Postgres at DATABASE_URL (${e.message}). Fix the URL or start the database; Readthrough won't switch to SQLite on its own, since that would split your data. Unset DATABASE_URL to use SQLite on purpose.`
   : `couldn't open SQLite at ${SQLITE}: ${e.message}`));
 
 // ---------- self-checks ----------

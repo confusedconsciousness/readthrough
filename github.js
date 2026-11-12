@@ -7,7 +7,7 @@ const API = 'https://api.github.com';
 function ghError(status, body) {
   const e = new Error(
     status === 401 ? 'Your GitHub sign-in has expired. Sign in again.'
-      : status === 404 ? "GitHub can't find that, or you can't see it. On a hosted Odyssey, the GitHub App must also be installed on that repository."
+      : status === 404 ? "GitHub can't find that, or you can't see it. On a hosted Readthrough, the GitHub App must also be installed on that repository."
       : status === 403 && /rate limit/i.test(body?.message || '') ? 'GitHub rate limit reached. Try again in a few minutes.'
       : `GitHub answered ${status}: ${body?.message || 'no details'}`,
   );
@@ -24,7 +24,7 @@ async function gh(token, p, { all, method = 'GET', body } = {}) {
       method,
       headers: {
         authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28',
-        'user-agent': 'odyssey', ...(body && { 'content-type': 'application/json' }),
+        'user-agent': 'readthrough', ...(body && { 'content-type': 'application/json' }),
       },
       body: body && JSON.stringify(body),
       signal: AbortSignal.timeout(30_000),
@@ -53,7 +53,7 @@ function oauth({ clientId, clientSecret, publicURL }) {
   async function exchange(params) {
     const r = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
-      headers: { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'odyssey' },
+      headers: { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'readthrough' },
       body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, ...params }),
       signal: AbortSignal.timeout(30_000),
     });

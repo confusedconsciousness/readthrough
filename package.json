@@ -1,5 +1,5 @@
 {
-  "name": "odyssey",
+  "name": "readthrough",
   "private": true,
   "description": "A guided review of GitHub pull requests.",
   "type": "commonjs",

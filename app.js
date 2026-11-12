@@ -1,4 +1,4 @@
-// Odyssey front end: one IIFE. state → helpers → routing → home → PR panes → flow map → events.
+// Readthrough front end: one IIFE. state → helpers → routing → home → PR panes → flow map → events.
 (() => {
   'use strict';
 
@@ -12,6 +12,7 @@
   let me = null;    // { mode: 'hosted'|'local', user, installs, installURL } from /api/me
 
   const store = {
+    // ponytail: storage keys keep the pre-rename prefix so saved choices survive; nobody sees them
     get: (k, d) => { try { return JSON.parse(localStorage.getItem('odyssey:' + k)) ?? d; } catch { return d; } },
     set: (k, v) => { try { localStorage.setItem('odyssey:' + k, JSON.stringify(v)); } catch {} },
   };
@@ -22,7 +23,7 @@
 
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   // A dropped connection (the server restarted, say) gets a plain message instead of the browser's "Failed to fetch".
-  const LOST = 'Lost the connection to Odyssey. If it restarted, a read in progress stopped with it. Press Try again.';
+  const LOST = 'Lost the connection to Readthrough. If it restarted, a read in progress stopped with it. Press Try again.';
   const api = (p) => fetch(p).catch(() => { throw new Error(LOST); }).then(async (r) => {
     const j = await r.json().catch(() => ({}));
     if (r.status === 401 && me?.user) { me.user = null; account(); landing(); }
@@ -180,84 +181,81 @@
     return `<span class="ds"><span class="up">+${a}</span> <span class="down">−${d}</span> <span class="blocks" aria-hidden="true">${'<i class="g"></i>'.repeat(g)}${'<i class="r"></i>'.repeat(r)}${'<i></i>'.repeat(5 - g - r)}</span></span>`;
   }
 
+  // Home: the tour to pick up again, what needs you, and the rest of your tours (searchable, a page at a time).
+  let homeData = { r: null, inbox: null, err: '', q: '', page: 0 };
   async function home() {
     cur = null;
     crumb.innerHTML = '';
     status.innerHTML = '';
-    view.innerHTML = `<div class="home">
-      <section class="start">
-        <form class="go big" autocomplete="off">
-          <input name="pr" placeholder="Paste a pull request link: github.com/owner/repo/pull/123" aria-label="Pull request link" spellcheck="false" autofocus>
-          <button class="btn primary">Open</button>
-        </form>
-        <p class="hint">Odyssey turns a pull request into a guided tour, with each step pinned to the code it explains. Press <kbd>/</kbd> to come back here from anywhere.</p>
-      </section>
-      <section id="recent"></section>
-      ${me?.mode === 'hosted' && me.installs === 0 ? `<div class="notice-plain">Odyssey's GitHub App isn't installed on any repository you can access, so there are no pull requests to list yet. ${me.installURL ? `<a href="${esc(me.installURL)}" target="_blank" rel="noopener">Install it</a> on your organization, or ask an organization admin to.` : 'Ask an organization admin to install it.'}</div>` : ''}
-      <div class="lists" id="inbox">${['Waiting on your review', 'Your pull requests'].map((t) => `<section><h2>${t}</h2><ul class="prs">${'<li class="skel"><span></span></li>'.repeat(3)}</ul></section>`).join('')}</div>
-    </div>`;
+    homeData = { r: null, inbox: null, err: '', q: '', page: 0 };
+    view.innerHTML = `<div class="home2"><header class="h-head"><h1>Pull requests</h1>
+      <form class="go h-search" autocomplete="off" role="search"><input name="pr" type="search" placeholder="Search tours and pull requests, or paste a PR link" aria-label="Search, or paste a pull request link" spellcheck="false"><kbd>/</kbd></form></header>
+      <div id="home2"></div></div>`;
+    renderHome();
     refreshRecent();
-    try {
-      inbox = await api('/api/inbox');
-      lists();
-    } catch (e) {
-      if ($('#inbox')) $('#inbox').innerHTML = `<p class="muted">Couldn't list pull requests: ${esc(e.message)}</p>`;
-    }
+    try { homeData.inbox = await api('/api/inbox'); } catch (e) { homeData.err = e.message; }
+    renderHome();
   }
 
-  let inbox = null;
-  function lists() {
-    if (!inbox || !$('#inbox')) return;
-    const by = store.get('sort', 'recent'), sorted = (a) => (by === 'effort' ? [...a].sort((x, y) => effort(x.add, x.del, x.files) - effort(y.add, y.del, y.files) || x.add + x.del - (y.add + y.del)) : a);
-    $('#inbox').innerHTML = `<div class="lists-head"><span class="muted">Sort</span><span class="seg-btns">${[['recent', 'Recent'], ['effort', 'Smallest first']].map(([k, l]) => `<button data-sort="${k}" class="${by === k ? 'on' : ''}" aria-pressed="${by === k}">${l}</button>`).join('')}</span></div>`
-      + prList('Waiting on your review', sorted(inbox.review), 'Nothing is waiting on your review.') + prList('Your pull requests', sorted(inbox.mine), 'You have no open pull requests.');
-  }
-
-  function prList(title, items, empty) {
-    return `<section><h2>${title} <span class="count">${items.length || ''}</span></h2>${items.length ? `<ul class="prs">${items.map((p) => {
-      const [label, tone] = p.draft ? ['Draft', 'muted'] : REVIEW[p.review] || ['', ''];
-      return `<li><a href="#/${esc(p.ref)}">
-        ${p.avatar ? `<img class="av" src="${esc(p.avatar)}" alt="" width="20" height="20" loading="lazy">` : '<span class="av"></span>'}
-        <span class="main"><span class="title">${esc(p.title)}</span><span class="sub">${esc(p.repo)} #${p.num} · ${esc(p.author)} · ${ago(p.updated)}${label ? ` · <span class="rv ${tone}">${label}</span>` : ''}</span></span>
-        <span class="side">${diffstat(p.add, p.del)}<span class="files">${plural(p.files, 'file')} · ${effortChip(effort(p.add, p.del, p.files))}</span></span>
-        <span class="tt ${p.tour ? 'ready' : p.reading ? 'busy' : ''}">${p.tour ? 'Tour ready' : p.reading ? 'Reading' : 'Not read'}</span>
-      </a></li>`;
-    }).join('')}</ul>` : `<p class="empty">${empty}</p>`}</section>`;
-  }
-
-  // Reads in progress and saved tours. Polls while something is being read, so finished reads move into the grid.
   let recentTimer;
   async function refreshRecent() {
     clearTimeout(recentTimer);
-    if (!$('#recent')) return;
-    let r;
-    try { r = await api('/api/recent'); } catch { return; }
-    const box = $('#recent');
-    if (!box) return;
-    const reading = r.reading.length ? `<h2>Reading now</h2><ul class="reading">${r.reading.map((x) => `<li><a href="#/${esc(x.key)}">
-        <span class="pulse"></span><span class="k">${keyLabel(x.key)}</span><span class="title">${esc(x.title || '')}</span>
-        <span class="muted">${esc(pretty(x.model))}</span><span class="elapsed" data-since="${x.since}">${clock(Date.now() - x.since)}</span></a></li>`).join('')}</ul>` : '';
-    const cards = r.tours.map((t) => {
-      const d = new Set(store.get(`done:${t.key}@${t.sha}`, [])), n = t.stops;
-      return `<a class="card" href="#/${esc(t.key)}">
-        <div class="thumb">${t.flow?.nodes?.length ? flowMap(t.flow, n, true) : ''}</div>
-        <div class="card-body">
-          <p class="card-k">${keyLabel(t.key)}${t.state ? `<span class="state s-${esc(t.state)}">${STATE[t.state] || esc(t.state)}</span>` : ''}</p>
-          <h3>${esc(t.title || t.key)}</h3>
-          <p class="card-gist">${prose(t.gist)}</p>
-        </div>
-        <div class="card-foot">
-          <span class="pbar" aria-hidden="true"><i style="width:${n ? (d.size / n) * 100 : 0}%"></i></span>
-          <span>${d.size === n && n ? 'All stops understood' : `${d.size}/${n} understood`}</span>
-          ${t.rec ? `<span class="rec-mini">${recIc(t.rec)}${REC[t.rec]?.[0] || ''}</span>` : ''}<span class="muted">${esc(pretty(t.model))} · ${ago(t.at)}</span>
-        </div>
-      </a>`;
-    }).join('');
-    box.innerHTML = `${reading}<h2>Your tours <span class="count">${r.tours.length || ''}</span></h2>${cards
-      ? `<div class="cards">${cards}</div>`
-      : `<p class="empty">No tours yet. Open a pull request above and its tour is kept here. Try a public one: <a href="#/cli/cli/15002">cli/cli #15002</a>.</p>`}`;
-    if (r.reading.length) recentTimer = setTimeout(refreshRecent, 4000);
+    if (!$('#home2')) return;
+    try { homeData.r = await api(`/api/recent?q=${encodeURIComponent(homeData.q)}&page=${homeData.page}`); } catch { return; }
+    renderHome();
+    if (homeData.r.reading.length) recentTimer = setTimeout(refreshRecent, 4000);
   }
+  const lists = () => renderHome();
+
+  // Shared pieces
+  const progOf = (t) => { const d = new Set(store.get(`done:${t.key}@${t.sha}`, [])).size; return { d, n: t.stops }; };
+  const pbar = ({ d, n }) => `<span class="pbar" aria-hidden="true"><i style="width:${n ? (d / n) * 100 : 0}%"></i></span>`;
+  const progText = ({ d, n }) => (d === n && n ? 'All understood' : `${d}/${n} understood`);
+  const stateChip = (st) => (st ? `<span class="state s-${esc(st)}">${STATE[st] || esc(st)}</span>` : '');
+  const recChip = (rec) => (rec ? `<span class="rec-mini">${recIc(rec)}${REC[rec]?.[0] || ''}</span>` : '');
+  const thumbOf = (t) => (t.flow?.nodes?.length ? flowMap(t.flow, t.stops, true) : '<span class="nothumb"></span>');
+  const prRef = (x) => `${esc(x.repo)} <span class="num">#${x.num}</span>`;
+  const prRow = (x) => {
+    const [label, tone] = x.draft ? ['Draft', 'muted'] : REVIEW[x.review] || ['', ''];
+    return `<li><a href="#/${esc(x.ref)}">${x.avatar ? `<img class="av" src="${esc(x.avatar)}" alt="" width="20" height="20" loading="lazy">` : '<span class="av"></span>'}
+      <span class="main"><span class="title">${esc(x.title)}</span><span class="sub">${prRef(x)} · ${esc(x.author)} · ${ago(x.updated)}${label ? ` · <span class="rv ${tone}">${label}</span>` : ''}</span></span>
+      <span class="side">${diffstat(x.add, x.del)}${effortChip(effort(x.add, x.del, x.files))}</span>
+      <span class="tt ${x.tour ? 'ready' : x.reading ? 'busy' : ''}">${x.tour ? 'Tour ready' : x.reading ? 'Reading' : 'Not read'}</span></a></li>`;
+  };
+  const readingRows = (r) => r.reading.map((x) => `<li><a href="#/${esc(x.key)}"><span class="pulse"></span><span class="main"><span class="title">${esc(x.title || x.key)}</span><span class="sub">${keyLabel(x.key)} · ${esc(pretty(x.model))}</span></span><span class="elapsed" data-since="${x.since}">${clock(Date.now() - x.since)}</span></a></li>`).join('');
+  const sec = (title, n, body, empty) => `<section class="h-sec"><h2>${title}${n ? ` <span class="count">${n}</span>` : ''}</h2>${body || `<p class="empty">${empty}</p>`}</section>`;
+
+  function renderHome() {
+    const box = $('#home2');
+    if (!box) return;
+    const { r, inbox, err } = homeData;
+    const q = homeData.q.trim().toLowerCase(), hit = (x) => !q || `${x.repo} #${x.num} ${x.title} ${x.author}`.toLowerCase().includes(q);
+    const tours = r?.tours || [], reading = r?.reading || [], review = (inbox?.review || []).filter(hit), mine = (inbox?.mine || []).filter((x) => !x.tour && hit(x));
+    const total = r?.total ?? tours.length, per = r?.per || 10, page = r?.page || 0;
+    const pager = total > per ? `<nav class="pager" aria-label="Tour pages"><span>${page * per + 1}–${Math.min(total, (page + 1) * per)} of ${total}</span>
+      <button type="button" class="btn" data-page="${page - 1}"${page ? '' : ' disabled'}>Previous</button><button type="button" class="btn" data-page="${page + 1}"${(page + 1) * per < total ? '' : ' disabled'}>Next</button></nav>` : '';
+    const noTours = q ? `No tours match “${esc(homeData.q.trim())}”.` : 'No tours yet. Open a pull request and its tour is kept here.';
+    const skel = '<ul class="prs">' + '<li class="skel"><span></span></li>'.repeat(3) + '</ul>';
+    const inboxErr = err ? `<p class="muted">Couldn't list pull requests: ${esc(err)}</p>` : '';
+    const needs = () => [
+      reading.length ? sec('Reading now', reading.length, `<ul class="prs reading">${readingRows(r)}</ul>`) : '',
+      sec('Waiting on your review', review.length, inbox ? (review.length ? `<ul class="prs">${review.map(prRow).join('')}</ul>` : '') : inboxErr || skel, q ? 'No review requests match.' : 'Nothing is waiting on your review.'),
+      sec('Your open pull requests', mine.length, inbox ? (mine.length ? `<ul class="prs">${mine.map(prRow).join('')}</ul>` : '') : inboxErr || skel, q ? 'None of your open pull requests match.' : 'Every open pull request of yours has a tour.'),
+    ].join('');
+    const tourRow = (t) => { const p = progOf(t); return `<li><a class="t-row" href="#/${esc(t.key)}">
+        <span class="t-thumb">${thumbOf(t)}</span>
+        <span class="main"><span class="title">${esc(t.title || t.key)}</span><span class="sub">${keyLabel(t.key)} ${stateChip(t.state)}</span><span class="gist">${prose(t.gist)}</span></span>
+        <span class="t-meta">${pbar(p)}<span>${progText(p)}</span>${recChip(t.rec)}<span class="muted">${esc(pretty(t.model))} · ${ago(t.at)}</span></span></a></li>`; };
+    const next = q || page ? null : tours.find((t) => { const p = progOf(t); return p.d < p.n && t.state !== 'merged' && t.state !== 'closed'; }) || tours[0];
+    const rest = next ? tours.filter((t) => t !== next) : tours;
+    const p = next && progOf(next);
+    box.innerHTML = `${next ? `<a class="resume" href="#/${esc(next.key)}">
+        <div class="resume-copy"><p class="sub">Continue reading · ${keyLabel(next.key)} ${stateChip(next.state)}</p><h2>${esc(next.title || next.key)}</h2><p class="gist">${prose(next.gist)}</p>
+          <div class="resume-foot">${pbar(p)}<span>${progText(p)}</span>${recChip(next.rec)}<span class="btn primary">Resume tour</span></div></div>
+        <div class="resume-map">${thumbOf(next)}</div></a>` : ''}
+      <div class="resume-cols"><div>${needs()}</div><div>${sec(q ? 'Matching tours' : 'Your tours', total, rest.length ? `<ul class="t-list compact">${rest.map(tourRow).join('')}</ul>${pager}` : '', next ? 'No other tours yet.' : noTours)}</div></div>`;
+  }
+
 
   // ---------- PR ----------
 
@@ -268,7 +266,7 @@
       crumb.innerHTML = `<span class="repo">${esc(cur.key.replace(/\/(\d+)$/, ' #$1'))}</span>`;
       status.innerHTML = err ? '' : `<span class="elapsed-wrap">Fetching from GitHub…</span>`;
       view.innerHTML = err
-        ? `<div class="empty-state"><h1>Couldn't open this pull request</h1><p>${esc(err)}</p><p class="muted">Odyssey reads GitHub through <code>gh</code>. Check <code>gh auth status</code> and that you can see this repository.</p></div>`
+        ? `<div class="empty-state"><h1>Couldn't open this pull request</h1><p>${esc(err)}</p><p class="muted">Readthrough reads GitHub through <code>gh</code>. Check <code>gh auth status</code> and that you can see this repository.</p></div>`
         : `<div class="empty-state"><div class="bar-indef"></div></div>`;
       return;
     }
@@ -305,6 +303,7 @@
     // Until the tour arrives the overview stands in, but cur.sel keeps the deep link. The since view needs only the PR.
     let sel = cur.sel;
     if (sel === 'since' ? !hasSince(pr) : !s || (typeof sel === 'number' && !s.stops[sel]) || (sel === 'intent' && !hasIntent(s))) sel = 'overview';
+    document.querySelectorAll('.l-steps [data-sel]').forEach((b) => { b.classList.toggle('on', b.dataset.sel === String(sel)); b.setAttribute('aria-pressed', b.dataset.sel === String(sel)); });
     const [note, code] = sel === 'since' ? sincePane() : s ? pane(sel) : waiting();
     $('#note').innerHTML = note;
     $('#code').innerHTML = diffBar() + code;
@@ -378,9 +377,9 @@
       const fs = numbered(r.findings);
       return [
         `<p class="kicker">Review</p>
-         <h1 class="title">Odyssey's review</h1>
+         <h1 class="title">Readthrough's review</h1>
          <div class="review-box">
-           <div class="rb-head">${recIc(r.recommendation)}<span><b>Odyssey</b> ${REC_SAYS[r.recommendation] || ''}</span>${tally(r) ? `<span class="rb-tally">${tally(r)}</span>` : ''}</div>
+           <div class="rb-head">${recIc(r.recommendation)}<span><b>Readthrough</b> ${REC_SAYS[r.recommendation] || ''}</span>${tally(r) ? `<span class="rb-tally">${tally(r)}</span>` : ''}</div>
            <div class="rb-body"><p>${prose(r.summary)}</p></div>
          </div>
          <h2>Scorecard</h2>
@@ -408,7 +407,7 @@
     }
     if (sel === 'unread') return [
       `<h1 class="title">Unexplained</h1>
-       <p>${plural(u.hunks.length, 'hunk')} ${u.hunks.length === 1 ? "isn't" : "aren't"} covered by any stop. Odyssey works this out itself, so nothing in the diff gets skipped quietly. Read these directly.</p>
+       <p>${plural(u.hunks.length, 'hunk')} ${u.hunks.length === 1 ? "isn't" : "aren't"} covered by any stop. Readthrough works this out itself, so nothing in the diff gets skipped quietly. Read these directly.</p>
        ${u.files.length ? `<h2>No diff available</h2><ul class="plain">${u.files.map((f) => `<li><code>${esc(f.path)}</code></li>`).join('')}</ul>` : ''}`,
       u.hunks.map((id) => hunkById(pr, id)).join('') || `<p class="code-empty">Nothing here.</p>`,
     ];
@@ -539,8 +538,7 @@
   // marks: [{ k, from, to }] in 1-based rows. Marked rows get a gutter number and stay visible even in long hunks.
   function hunk(pr, f, h, marks = []) {
     const MAX = 80, long = h.lines.length > MAX + 20 && !marks.some((m) => m.to > MAX), L = LETTER[f.status] || 'M';
-    // A hunk that only adds has nothing to set side by side, so it stays unified.
-    const split = diffView() === 'split' && h.lines.some((l) => l[0] === '-');
+    const split = diffView() === 'split';
     const rows = split ? splitRows(h, marks, long, MAX) : h.lines.map(([s, o, n, t, hl], i) => {
       const on = marks.filter((m) => i + 1 >= m.from && i + 1 <= m.to), first = marks.find((m) => m.from === i + 1);
       const cls = [s === '+' ? 'add' : s === '-' ? 'del' : '', long && i >= MAX ? 'more' : '', on.length ? 'pt' : ''].filter(Boolean).join(' ');
@@ -781,8 +779,8 @@
   const DESC = {
     anthropic: 'Your Anthropic API key. Reads are billed to your Anthropic account.',
     openai: 'OpenAI, OpenRouter or any OpenAI-compatible API, with your own key.',
-    claude: "This machine's Claude Code login. Only when Odyssey runs on your own machine.",
-    codex: "This machine's Codex login, which uses your ChatGPT plan. Only when Odyssey runs on your own machine.",
+    claude: "This machine's Claude Code login. Only when Readthrough runs on your own machine.",
+    codex: "This machine's Codex login, which uses your ChatGPT plan. Only when Readthrough runs on your own machine.",
   };
   const MODEL_NOTE = { 'claude-sonnet-5-5': 'fast, the default', 'claude-opus-5-5': 'most thorough, slower', 'claude-haiku-5-5': 'quickest, lightest' };
 
@@ -855,11 +853,11 @@
       <div class="menu-pop">
         <p class="menu-who">Signed in as <b>${esc(u.login)}</b>${me.mode === 'local' ? '<br><span class="muted">through the <code>gh</code> CLI on this machine</span>' : ''}</p>
         <a href="#/" data-menu>Your pull requests</a>
-        <a href="#/about" data-menu>About Odyssey</a>
+        <a href="#/about" data-menu>About Readthrough</a>
         <button type="button" data-settings data-menu>AI settings</button>
         ${me.mode === 'hosted'
           ? '<button type="button" data-signout>Sign out</button>'
-          : '<p class="menu-note">Local mode has no Odyssey sign-in. To use another GitHub account, run <code>gh auth logout</code> and <code>gh auth login</code>, then reload.</p>'}
+          : '<p class="menu-note">Local mode has no Readthrough sign-in. To use another GitHub account, run <code>gh auth logout</code> and <code>gh auth login</code>, then reload.</p>'}
       </div>
     </details>`;
   }
@@ -869,12 +867,32 @@
     location.href = '/';
   }
 
-  // ---------- landing: what Odyssey is, for signed-out visitors ----------
+  // ---------- landing: what Readthrough is, for signed-out visitors ----------
 
   const GH_MARK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>';
 
   // The same sequence diagram the app draws, frozen on one hop for the page.
   function seqAt(sc, nodes, i) { const k = play.i; play.i = i; const svg = seqSVG(sc, nodes); play.i = k; return svg; }
+
+  // Pull requests in, one read, stops out. Strands from the PRs on the left run into the reading line; ordered lanes leave it,
+  // each ending in a stop from the demo tour. SVG and CSS only; still when the viewer asks for less motion.
+  function chaosSVG(titles) {
+    let seed = 7;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const W = 760, X = 380, C = X + 110, chips = Array.from({ length: 15 }, (_, i) => ({ x: 4 + Math.floor(rnd() * 4) * 58, y: 14 + i * 24 + rnd() * 4, add: 12 + Math.floor(rnd() * 880), del: Math.floor(rnd() * 140) }));
+    const lanes = titles.slice(0, 5), ly = (k) => 112 + k * 40;
+    const strand = (c, i) => {
+      const y0 = c.y + 10, y1 = 120 + (i / (chips.length - 1)) * 140, d = `M${c.x + 62},${y0} C${c.x + 170},${y0} ${X - 80},${y1} ${X},${y1}`, tone = i % 3 ? 'g' : 'r';
+      return `<path class="strand ${tone}" d="${d}" pathLength="300"/><path class="strand pk ${tone}" d="${d}" pathLength="300" style="--d:${i}"/>`;
+    };
+    return `<svg class="chaos" viewBox="0 0 ${W} 380" role="img" aria-label="Many pull requests run into one read, which comes out as a few ordered stops">
+      ${chips.map(strand).join('')}
+      ${chips.map((c, i) => `<g class="chip" style="--d:${i}"><rect x="${c.x}" y="${c.y}" width="62" height="20" rx="5"/><text x="${c.x + 31}" y="${c.y + 13.5}" text-anchor="middle"><tspan class="a">+${c.add}</tspan> <tspan class="d">−${c.del}</tspan></text></g>`).join('')}
+      ${lanes.map((_, k) => `<path class="lane" d="M${X},${ly(k)} H${C - 11}" pathLength="300"/><path class="lane pk" d="M${X},${ly(k)} H${C - 11}" pathLength="300" style="--d:${k}"/>`).join('')}
+      <line class="read-line" x1="${X}" y1="90" x2="${X}" y2="${ly(lanes.length - 1) + 22}"/>
+      ${lanes.map((t, k) => `<g class="stop-n" style="--d:${k}"><circle cx="${C}" cy="${ly(k)}" r="11"/><text x="${C}" y="${ly(k) + 4}" text-anchor="middle">${k + 1}</text><text class="t" x="${C + 22}" y="${ly(k) + 5}">${esc(t.length > 32 ? t.slice(0, 31) + '…' : t)}</text></g>`).join('')}
+    </svg>`;
+  }
 
   // Feature cards for the landing page. Every visual is drawn from the demo tour, never mocked.
   function bento(demo) {
@@ -891,11 +909,11 @@
     const commits = `<ul class="b-list b-commits">${pr.commits.map((c, i) => `<li><i class="b-dot"></i><span>${esc(typeof c === 'string' ? c : c.message || '')}</span>${i === pr.commits.length - 1 ? '<em class="b-new">New</em>' : '<em>Toured</em>'}</li>`).join('')}</ul>`;
     return [
       card(4, stops, 'Read it in the order it runs.', 'The diff is split into stops, starting where execution starts. Each sentence is pinned to the lines it describes.'),
-      card(2, hunksVis, 'Nothing in the diff is skipped.', 'Odyssey counts coverage itself, without the model. If no stop explains a hunk, it is listed separately so you still read it.'),
+      card(2, hunksVis, 'Nothing in the diff is skipped.', 'Readthrough counts coverage itself, without the model. If no stop explains a hunk, it is listed separately so you still read it.'),
       card(2, verdicts, 'Is each change needed?', 'Each part is marked needed, supporting or questionable, with a reason you can paste into your review.'),
       sc ? card(4, `<div class="b-seq">${seqAt(sc, st.flow.nodes, Math.min(3, sc.steps.length - 1))}</div>`, 'Step through a request.', `Follow one request call by call, on a map or as a sequence diagram. This one: ${esc(sc.title.toLowerCase())}.`) : '',
       st.intent?.items?.length ? card(3, reqs, 'Checked against the linked issue.', 'Each requirement in the issue is matched to the code that meets it. Requirements with no matching code are listed too.') : '',
-      pr.commits?.length ? card(3, commits, 'Only the new commits.', 'After a push, Odyssey opens on the commits you haven\'t seen yet.') : '',
+      pr.commits?.length ? card(3, commits, 'Only the new commits.', 'After a push, Readthrough opens on the commits you haven\'t seen yet.') : '',
     ].join('');
   }
 
@@ -906,27 +924,38 @@
     document.body.dataset.view = 'landing';
     const local = me?.mode === 'local';
     const cta = me?.user
-      ? `<a class="l-btn" href="#/">Open your pull requests</a><a class="l-link" href="#tour" data-jump="tour">See a real tour</a>`
+      ? `<a class="l-btn" href="#/">Open your pull requests<kbd>O</kbd></a><a class="l-btn ghost" href="#tour" data-jump="tour">See a real tour<kbd>T</kbd></a>`
       : local
-      ? '<p class="l-note">This Odyssey runs on your machine and reads GitHub through the <code>gh</code> CLI. Run <code>gh auth login</code>, then reload.</p>'
-      : `<a class="l-btn" href="/auth/login">${GH_MARK}Sign in with GitHub</a><a class="l-link" href="#tour" data-jump="tour">See a real tour</a>`;
+      ? '<p class="l-note">This Readthrough runs on your machine and reads GitHub through the <code>gh</code> CLI. Run <code>gh auth login</code>, then reload.</p>'
+      : `<a class="l-btn" href="/auth/login">${GH_MARK}Sign in with GitHub<kbd>O</kbd></a><a class="l-btn ghost" href="#tour" data-jump="tour">See a real tour<kbd>T</kbd></a>`;
     view.innerHTML = `<div class="landing">
+      <div class="l-frame">
       <header class="l-hero">
-        <div class="l-hero-in">
-          <h1>Ship what you understand.</h1>
-          <p class="l-sub">Odyssey walks you through a pull request in the order its code runs. At each stop it shows the lines that changed, explains why they're there, and says what to check before you merge.</p>
+        <p class="l-eyebrow">pull request tours, for code you didn't write</p>
+        <h1 class="l-diff" aria-label="Ship what you understand."><span class="del" aria-hidden="true"><i>−</i>Ship what the AI wrote.</span><span class="add" aria-hidden="true"><i>+</i>Ship what you understand.</span></h1>
+        <div class="l-hero-row">
+          <p class="l-sub">Readthrough walks you through a pull request in the order its code runs. At each stop it shows the lines that changed, explains why they're there, and says what to check before you merge.</p>
           <div class="l-cta">${cta}</div>
         </div>
       </header>
 
       <section class="l-window-wrap" id="tour">
+        <nav class="l-steps" aria-label="Parts of a tour">${[['overview', 'Overview', 'How the changed parts connect'], ['1', 'Stops', 'In the order the code runs'], ['3', "Why it's there", 'Needed, supporting or not'], ['intent', 'The linked issue', 'Each requirement checked']]
+          .map(([sel, t, d], i) => `<button type="button" data-sel="${sel}"><span class="n">0${i + 1}</span><span class="t">${t}</span><span class="d">${d}</span></button>`).join('')}</nav>
         <div class="l-window">
-          <div class="l-chrome"><span class="l-dot"></span><span class="l-url">odyssey <span>/</span> <b id="demo-name">loading…</b></span><span class="l-live">Live demo · click around</span></div>
+          <div class="l-chrome"><span class="l-dot"></span><span class="l-url">readthrough <span>/</span> <b id="demo-name">loading…</b></span><span class="l-live">Live demo · click around</span></div>
           <div class="app l-app" id="demo-app"><nav class="tour" aria-label="Tour"></nav><section class="note" id="note"></section><section class="code" id="code"></section></div>
         </div>
       </section>
+      </div>
 
       <section class="l-works" aria-label="Works with"><span>Works with</span><b>GitHub</b><b>Claude</b><b>OpenAI</b><b>OpenRouter</b><b>Claude Code</b><b>Codex</b><b>Postgres</b><b>SQLite</b></section>
+
+      <section class="l-chaos" id="l-chaos" hidden>
+        <div class="l-chaos-art"></div>
+        <div class="l-chaos-copy"><h2>Pull requests now arrive faster than anyone can read them.</h2>
+          <p>A coding agent can open a forty-file change in minutes. Readthrough reads it first and hands you a few stops, in the order the code runs, so you review the change instead of skimming it.</p></div>
+      </section>
 
       <section class="l-feat" id="features">
         <div class="l-head"><h2>Built for code you didn't write.</h2>
@@ -935,25 +964,25 @@
       </section>
 
       <section class="l-band" id="security">
-        <h2>What Odyssey can access</h2>
+        <h2>What Readthrough can access</h2>
         <div class="l-trust">
           <div><b>GitHub, read-only</b><p>Your organization installs a read-only GitHub App. Each person sees only the pull requests their own account can read.</p></div>
-          <div><b>Your AI provider</b><p>Anthropic, OpenAI or OpenRouter with your own key, or the Claude Code and Codex logins on your machine. Odyssey has no model of its own.</p></div>
+          <div><b>Your AI provider</b><p>Anthropic, OpenAI or OpenRouter with your own key, or the Claude Code and Codex logins on your machine. Readthrough has no model of its own.</p></div>
           <div><b>Your database</b><p>Tours are saved in your Postgres or SQLite database, so a teammate can reopen one without paying for another read. API keys are encrypted at rest.</p></div>
         </div>
       </section>
 
       <footer class="l-foot">
         <div class="f-top">
-          <div class="f-brand"><span class="brand-sm"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="12.5" r="2"/><circle cx="12.5" cy="3.5" r="2"/><path d="M3.5 10.5V8a3 3 0 0 1 3-3h4"/></svg>Odyssey</span>
+          <div class="f-brand"><span class="brand-sm"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="12.5" r="2"/><circle cx="12.5" cy="3.5" r="2"/><path d="M3.5 10.5V8a3 3 0 0 1 3-3h4"/></svg>Readthrough</span>
             <h2>Read it before you merge it.</h2>
-            <p>Odyssey explains pull requests for teams that review AI-written code.</p></div>
+            <p>Readthrough explains pull requests for teams that review AI-written code.</p></div>
           <nav aria-label="Product"><h4>Product</h4><a href="#tour" data-jump="tour">Live demo</a><a href="#features" data-jump="features">Features</a><a href="#security" data-jump="security">Security</a></nav>
           <nav aria-label="Account"><h4>Account</h4>${me?.user ? '<a href="#/">Your pull requests</a>' : local ? '' : '<a href="/auth/login">Sign in with GitHub</a>'}<a href="#tour" data-jump="tour">See a real tour</a></nav>
           <div><h4>Bring your AI</h4><span>Claude</span><span>OpenAI</span><span>OpenRouter</span><span>Claude Code</span><span>Codex</span></div>
         </div>
-        <p class="f-mark" aria-hidden="true">Odys<span>sey</span></p>
-        <div class="f-bot"><span>© 2026 Odyssey</span><span>Read-only GitHub access · Your own AI keys</span></div>
+        <p class="f-mark" aria-hidden="true">Read<span>through</span></p>
+        <div class="f-bot"><span>© 2026 Readthrough</span><span>Read-only GitHub access · Your own AI keys</span></div>
       </footer>
     </div>`;
     try {
@@ -964,6 +993,8 @@
       $('#demo-app .tour').innerHTML = tour();
       show();
       $('#bento').innerHTML = bento(demo);
+      $('#l-chaos .l-chaos-art').innerHTML = chaosSVG(demo.story.stops.map((x) => x.title));
+      $('#l-chaos').hidden = false;
     } catch {
       $('#tour')?.remove();
       $('#features')?.remove();
@@ -976,18 +1007,30 @@
     if (!e.target.matches('.go')) return;
     e.preventDefault();
     const input = e.target.elements.pr, key = refOf(input.value);
+    if (!key && e.target.matches('.h-search')) { // not a link: open the only match, if there is exactly one
+      const only = [...new Set([...document.querySelectorAll('#home2 a[href^="#/"]')].map((a) => a.getAttribute('href')))];
+      if (only.length === 1) location.hash = only[0];
+      return;
+    }
     if (!key) { input.setCustomValidity('Paste a link like github.com/owner/repo/pull/123'); input.reportValidity(); return; }
     input.value = ''; input.blur();
     location.hash = `#/${key}`;
   });
   document.addEventListener('input', (e) => e.target.setCustomValidity?.(''));
+  // Home search: filters as you type (tours on the server, so every page is searched); a pasted PR link still opens on Enter.
+  let searchTimer;
+  document.addEventListener('input', (e) => {
+    if (!e.target.closest?.('.h-search')) return;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { homeData.q = e.target.value; homeData.page = 0; renderHome(); refreshRecent(); }, 180);
+  });
 
   document.addEventListener('click', (e) => {
     if (e.target.closest?.('[data-menu]')) e.target.closest?.('details')?.removeAttribute('open');
     if (e.target.closest?.('[data-signout]')) return signOut();
     const jump = e.target.closest?.('[data-jump]');
     if (jump) { e.preventDefault(); return document.getElementById(jump.dataset.jump)?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); }
-    const t = e.target.closest?.('[data-diff],[data-view],[data-scn],[data-pstep],[data-play],[data-hop],[data-sort],[data-settings],[data-pt],[data-sel],[data-hunk],[data-ack],[data-step],[data-expand],[data-fresh]');
+    const t = e.target.closest?.('[data-page],[data-diff],[data-view],[data-scn],[data-pstep],[data-play],[data-hop],[data-sort],[data-settings],[data-pt],[data-sel],[data-hunk],[data-ack],[data-step],[data-expand],[data-fresh]');
     if (!t) return;
     const ds = t.dataset;
     if (ds.view) { play.view = ds.view; $$('[data-view]').forEach((b) => { b.classList.toggle('on', b === t); b.setAttribute('aria-pressed', b === t); }); paintView(); }
@@ -995,6 +1038,7 @@
     else if (ds.pstep) { stopPlay(); goHop(play.i + +ds.pstep); }
     else if ('play' in ds) togglePlay();
     else if (ds.hop) { stopPlay(); goHop(+ds.hop); }
+    else if (ds.page) { homeData.page = Math.max(0, +ds.page); refreshRecent(); $('.home2')?.scrollIntoView({ block: 'start' }); }
     else if (ds.diff) { const y = $('#code')?.scrollTop; store.set('diff', ds.diff); show(); if ($('#code')) $('#code').scrollTop = y; }
     else if (ds.sort) { store.set('sort', ds.sort); lists(); }
     else if ('settings' in ds) openSettings();
@@ -1010,8 +1054,12 @@
   document.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey || dlg.open) return;
     if (e.target.closest?.('input,textarea')) { if (e.key === 'Escape') e.target.blur(); return; }
-    if (e.key === '/') { e.preventDefault(); ($('.home .go input') || $('#pr-input')).focus(); return; }
+    if (e.key === '/') { e.preventDefault(); ($('.home2 .go input') || $('#pr-input')).focus(); return; }
     if (e.key === 'Enter' && e.target.matches?.('.node.link')) return select(+e.target.dataset.sel);
+    if (document.body.dataset.view === 'landing' && (e.key === 'o' || e.key === 't')) { // the shortcuts shown on the landing buttons
+      e.preventDefault();
+      return e.key === 'o' ? $('.l-btn:not(.ghost)')?.click() : document.getElementById('tour')?.scrollIntoView({ behavior: 'smooth' });
+    }
     if (!cur?.pr) return;
     if ($('#player') && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) { e.preventDefault(); stopPlay(); return goHop(play.i + (e.key === 'ArrowRight' ? 1 : -1)); }
     if ($('#player') && e.key === ' ' && !e.target.closest?.('button')) { e.preventDefault(); return togglePlay(); }

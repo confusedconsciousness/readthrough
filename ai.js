@@ -7,7 +7,7 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 const Anthropic = require('@anthropic-ai/sdk');
 
-const EFFORT = process.env.ODYSSEY_EFFORT || 'high';
+const EFFORT = process.env.READTHROUGH_EFFORT || process.env.ODYSSEY_EFFORT || 'high';
 
 function run(cmd, args, { input, timeout = 60_000, cwd } = {}) {
   return new Promise((resolve, reject) => {
@@ -270,7 +270,7 @@ async function viaClaudeCode(cfg, input, system, schema) {
 
 async function viaCodex(cfg, input, system, schema) {
   // Codex is an agent: give it an empty read-only folder, and take its schema-checked last message from a file.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'odyssey-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'readthrough-'));
   try {
     fs.writeFileSync(path.join(dir, 'schema.json'), JSON.stringify(schema));
     await run('codex', [

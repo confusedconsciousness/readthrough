@@ -2,7 +2,7 @@
 // Postgres when DATABASE_URL is set; otherwise SQLite in a single file (node:sqlite, built into Node).
 // The queries are written once for both: times are ISO-8601 text made in JS, JSON is stored as text,
 // and nothing Postgres-only (DISTINCT ON, = ANY, make_interval) is used.
-// Secrets (GitHub tokens, AI keys) are sealed with AES-256-GCM under ODYSSEY_SECRET before they reach a row.
+// Secrets (GitHub tokens, AI keys) are sealed with AES-256-GCM under READTHROUGH_SECRET before they reach a row.
 const crypto = require('node:crypto');
 
 let kind, pool, lite, KEY;
@@ -140,7 +140,7 @@ function seal(s) {
   const ct = Buffer.concat([c.update(s, 'utf8'), c.final()]);
   return Buffer.concat([iv, c.getAuthTag(), ct]).toString('base64');
 }
-// A value sealed under an old ODYSSEY_SECRET reads as missing: people sign in again and re-enter keys, nothing crashes.
+// A value sealed under an old READTHROUGH_SECRET reads as missing: people sign in again and re-enter keys, nothing crashes.
 function unseal(b) {
   if (!b) return null;
   try {
@@ -237,14 +237,23 @@ const markOpened = (userId, ref) => q(`insert into opened (user_id, owner, repo,
   on conflict (user_id, owner, repo, num) do update set at = $5`, [userId, ...keyOf(ref), now()]);
 
 // The user's recently opened PRs, each with the tour opening it would show (their reader's first, else the newest).
-async function recentTours(userId, reader, limit = 12) {
-  const rows = await q(`select owner, repo, num, at, data from (
-      select o.owner, o.repo, o.num, o.at, t.data,
+// The latest tour of each PR this user opened, newest first, a page at a time. q matches the repository,
+// number or title. The stored diff text (anchors) is left out: the list never needs it and it can be large.
+async function recentTours(userId, reader, { q: text = '', limit = 10, offset = 0 } = {}) {
+  const pg = kind === 'pg';
+  const title = pg ? `t.data->'meta'->>'title'` : `json_extract(t.data, '$.meta.title')`;
+  const light = pg ? `t.data - 'anchors'` : `json_remove(t.data, '$.anchors')`;
+  const like = `%${String(text).trim().toLowerCase().replace(/[\\%_]/g, '\\$&')}%`;
+  const rows = await q(`select owner, repo, num, at, data, count(*) over () as total from (
+      select o.owner, o.repo, o.num, o.at, ${light} as data,
+        lower(o.owner || '/' || o.repo || ' #' || cast(o.num as text) || ' ' || coalesce(${title}, '')) as hay,
         row_number() over (partition by o.owner, o.repo, o.num order by (t.reader = $2) desc, t.created_at desc) as rn
       from opened o join tours t on t.owner = o.owner and t.repo = o.repo and t.num = o.num
       where o.user_id = $1
-    ) x where rn = 1 order by at desc limit $3`, [userId, reader, limit]);
-  return rows.map((r) => ({ ...r, data: json(r.data) }));
+    ) x where rn = 1 and hay like $3 escape '\\' order by at desc limit $4 offset $5`, [userId, reader, like, limit, offset]);
+  // a page past the end has no rows to carry the count, so ask for the first row just to learn the total
+  if (!rows.length && offset > 0) return { total: (await recentTours(userId, reader, { q: text, limit: 1 })).total, rows: [] };
+  return { total: Number(rows[0]?.total || 0), rows: rows.map((r) => ({ ...r, data: json(r.data) })) };
 }
 
 module.exports = {

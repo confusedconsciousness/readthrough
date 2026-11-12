@@ -42,21 +42,29 @@ async function check(label, opts) {
   assert.deepEqual(ai.keys, { anthropic: 'sk-ant-1' });
 
   const ref = { owner: 'o', repo: `r${gid}`, num: 7 };
-  await db.putTour(ref, 'sha1', 'claude-sonnet', { gist: 'one', stops: [], meta: { at: '2026-01-01T00:00:00.000Z' } }, u.id);
+  await db.putTour(ref, 'sha1', 'claude-sonnet', { gist: 'one', stops: [], anchors: { f0h0: ['a.js', '+x'] }, meta: { at: '2026-01-01T00:00:00.000Z', title: 'Fix 100% of the push_outbox bugs' } }, u.id);
   await new Promise((r) => setTimeout(r, 5));
   await db.putTour(ref, 'sha2', 'claude-opus', { gist: 'two', stops: [1], meta: { at: '2026-01-02T00:00:00.000Z' } }, u.id);
   assert.equal((await db.getTour(ref, 'sha2', 'claude-opus')).gist, 'two');
   assert.equal((await db.getTour(ref, 'sha2', 'someone-else')).gist, 'two'); // falls back to any reader of that commit
   assert.equal(await db.getTour(ref, 'sha3', 'claude-opus'), null);
-  assert.deepEqual(await db.previousTour(ref, 'sha2'), { sha: 'sha1', at: '2026-01-01T00:00:00.000Z' });
-  assert.deepEqual([...(await db.toured(['sha1', 'zzz']))], [`o/r${gid}/7@sha1`]);
+  const prev = await db.previousTour(ref, 'sha2');
+  assert.equal(prev.sha, 'sha1'); assert.equal(prev.at, '2026-01-01T00:00:00.000Z'); assert.equal(prev.data.gist, 'one');
+  assert.deepEqual([...(await db.toured(['sha1', 'zzz']))].filter((k) => k.includes(`r${gid}/`)), [`o/r${gid}/7@sha1`]); // other runs' rows may share the sha
   assert.equal((await db.toured([])).size, 0);
 
   await db.markOpened(u.id, ref);
   await db.markOpened(u.id, ref); // twice is fine
   const recent = await db.recentTours(u.id, 'claude-sonnet');
-  assert.equal(recent.length, 1);
-  assert.equal(recent[0].data.gist, 'one'); // this reader's tour wins over the newer one by another reader
+  assert.equal(recent.total, 1);
+  assert.equal(recent.rows[0].data.gist, 'one'); // this reader's tour wins over the newer one by another reader
+  assert.equal(recent.rows[0].data.anchors, undefined); // the stored diff text stays out of the list
+  // search matches the title, repository or number; % and _ are literal, not wildcards
+  for (const [text, n] of [['PUSH_OUTBOX', 1], ['#7', 1], [`r${gid}`, 1], ['100%', 1], ['1_0', 0], ['nothing like it', 0]]) {
+    assert.equal((await db.recentTours(u.id, 'claude-sonnet', { q: text })).total, n, `search ${text}`);
+  }
+  const page2 = await db.recentTours(u.id, 'claude-sonnet', { offset: 10 });
+  assert.equal(page2.rows.length, 0); assert.equal(page2.total, 1); // a page past the end is empty but still knows the total
 
   assert.equal(db.unseal('not-a-sealed-value'), null);
   await db.end();
@@ -64,7 +72,7 @@ async function check(label, opts) {
 }
 
 (async () => {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'odyssey-check-')), 'check.db');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'readthrough-check-')), 'check.db');
   await check('sqlite', { file });
   if (process.env.DATABASE_URL) await check('postgres', { url: process.env.DATABASE_URL });
   else console.log('skip postgres (set DATABASE_URL to a scratch database to include it)');
