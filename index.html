@@ -19,6 +19,7 @@
     <input name="pr" id="pr-input" placeholder="Open a pull request…" aria-label="Pull request link" spellcheck="false">
     <kbd>/</kbd>
   </form>
+  <div class="account" id="account"></div>
   <button id="gear" class="icon" aria-label="Choose the AI that reads PRs" title="Choose the AI that reads PRs">
     <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.5"/><circle cx="5.5" cy="11.5" r="1.5"/></svg>
   </button>
@@ -29,37 +30,7 @@
 <main id="view"></main>
 <footer class="status" id="status"></footer>
 <dialog id="settings" class="sheet" aria-labelledby="settings-h">
-  <form id="settings-form" autocomplete="off">
-    <h2 id="settings-h">Who reads the pull request</h2>
-    <p class="muted">The diff, description and commit messages are sent to this AI to write the tour.</p>
-    <fieldset class="providers">
-      <legend class="sr">Provider</legend>
-      <label class="opt"><input type="radio" name="provider" value="claude"><span><b>Claude Code</b><small>Uses your Claude login. No key needed.</small></span></label>
-      <label class="opt"><input type="radio" name="provider" value="codex"><span><b>Codex</b><small>Uses your ChatGPT login. No key needed.</small></span></label>
-      <label class="opt"><input type="radio" name="provider" value="api"><span><b>OpenAI-compatible API</b><small>OpenAI, OpenRouter or a local server, with your own key.</small></span></label>
-    </fieldset>
-    <div class="fields" data-for="claude">
-      <label>Model
-        <select name="claudeModel">
-          <option value="claude-sonnet-5-5">Sonnet 5.5 · fast, the default</option>
-          <option value="claude-opus-5-5">Opus 5.5 · most thorough, slower</option>
-          <option value="claude-haiku-5-5">Haiku 5.5 · quickest, lightest</option>
-        </select>
-      </label>
-    </div>
-    <div class="fields" data-for="codex">
-      <label>Model <input name="codexModel" placeholder="Blank uses your Codex default" spellcheck="false"></label>
-    </div>
-    <div class="fields" data-for="api">
-      <label>Base URL <input name="baseURL" placeholder="https://api.openai.com/v1" spellcheck="false"></label>
-      <label>Model <input name="apiModel" placeholder="The model id your provider lists" spellcheck="false"></label>
-      <label>API key <input name="key" type="password" spellcheck="false"></label>
-      <p class="small muted">Stored on this machine in <code>.odyssey.json</code>, readable only by you. It is never sent back to the browser.</p>
-    </div>
-    <p class="small muted">Tours you already have stay as they are. New PRs are read with this choice; use Re-read on a PR to read it again with it.</p>
-    <p class="err" id="settings-err" role="alert"></p>
-    <div class="row-end"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
-  </form>
+  <form id="settings-form" autocomplete="off"></form>
 </dialog>
 <script src="app.js"></script>
 </body>

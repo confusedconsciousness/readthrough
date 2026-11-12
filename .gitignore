@@ -1,2 +1,8 @@
 .cache/
+.cache.imported/
 .odyssey.json
+.odyssey-secret
+node_modules/
+.env
+!.env.example
+odyssey.db*
