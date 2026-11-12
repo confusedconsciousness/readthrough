@@ -221,7 +221,9 @@ const putTour = (ref, sha, reader, data, userId) => q(`insert into tours (owner,
 async function previousTour(ref, sha) {
   const [r] = await q(`select sha, data from tours where owner = $1 and repo = $2 and num = $3 and sha <> $4
     order by created_at desc limit 1`, [...keyOf(ref), sha]);
-  return r ? { sha: r.sha, at: json(r.data).meta?.at || null } : null;
+  if (!r) return null;
+  const data = json(r.data);
+  return { sha: r.sha, at: data.meta?.at || null, data };
 }
 
 // Which of these head commits already have a tour, as "owner/repo/num@sha" strings.

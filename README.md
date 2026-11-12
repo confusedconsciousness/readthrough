@@ -4,7 +4,7 @@ A guided review of a GitHub pull request: what it changes, why each part exists,
 
 ## What a tour shows
 
-Open a PR and Odyssey shows it in three panes: the list of stops, the explanation of the current stop, and that stop's diff with GitHub-style syntax colours.
+Open a PR and Odyssey shows it in three panes: the list of stops, the explanation of the current stop, and that stop's diff with GitHub-style syntax colours. **Unified** or **Split** (above the code) puts the old lines beside the new ones, each removed line facing its replacement; hunks that only add stay unified, and narrow windows always get unified. The choice is remembered.
 
 - **Overview:** the gist, the **goal** the PR exists to achieve, why it was made, the before → after of its behaviour, and every file with the stops that explain it.
 - **How it works:** the parts the PR touches (functions, routes, tables) as a map, in git colours (added, modified, deleted). Below it, 1–3 runtime walkthroughs, like "a member turns on notifications", told hop by hop: who calls whom, what data moves, and what happens if a condition holds. **Play** (or space) lights up each hop on the map with a moving dot carrying the data; ← and → step; **Sequence** shows the same walkthrough as a sequence diagram. Each hop shows the code that does it.

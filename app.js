@@ -190,7 +190,7 @@
           <input name="pr" placeholder="Paste a pull request link: github.com/owner/repo/pull/123" aria-label="Pull request link" spellcheck="false" autofocus>
           <button class="btn primary">Open</button>
         </form>
-        <p class="hint">Odyssey turns a pull request into a guided tour: what it changes, how the pieces connect, and each step pinned to its code. <kbd>/</kbd> jumps here from anywhere.</p>
+        <p class="hint">Odyssey turns a pull request into a guided tour, with each step pinned to the code it explains. Press <kbd>/</kbd> to come back here from anywhere.</p>
       </section>
       <section id="recent"></section>
       ${me?.mode === 'hosted' && me.installs === 0 ? `<div class="notice-plain">Odyssey's GitHub App isn't installed on any repository you can access, so there are no pull requests to list yet. ${me.installURL ? `<a href="${esc(me.installURL)}" target="_blank" rel="noopener">Install it</a> on your organization, or ask an organization admin to.` : 'Ask an organization admin to install it.'}</div>` : ''}
@@ -307,7 +307,7 @@
     if (sel === 'since' ? !hasSince(pr) : !s || (typeof sel === 'number' && !s.stops[sel]) || (sel === 'intent' && !hasIntent(s))) sel = 'overview';
     const [note, code] = sel === 'since' ? sincePane() : s ? pane(sel) : waiting();
     $('#note').innerHTML = note;
-    $('#code').innerHTML = code;
+    $('#code').innerHTML = diffBar() + code;
     if (sel === 'overview' && s) paintView(); else stopPlay();
     $('#note').scrollTop = $('#code').scrollTop = 0;
     $$('.tour [data-sel]').forEach((a) => a.classList.toggle('sel', a.dataset.sel === String(sel)));
@@ -329,7 +329,7 @@
     status.innerHTML = `<span class="segs" aria-hidden="true">${s.stops.map((_, i) => `<i class="${d.has(i) ? 'on' : ''}${cur.sel === i ? ' here' : ''}"></i>`).join('')}</span>
       <span><b>${d.size}</b>/${n} understood</span>
       ${u.hunks.length ? `<span class="warn">${plural(u.hunks.length, 'hunk')} unexplained</span>` : '<span>Every hunk explained</span>'}
-      <span class="muted">Read by <button class="link quiet" data-settings title="Change who reads PRs">${esc(pretty(s.meta.model))}</button> in ${clock(s.meta.ms)} · <button class="link${stale() ? ' strong' : ''}" data-fresh title="Read this PR again with ${esc(reader())}">${stale() ? `Re-read with ${esc(reader())}` : 'Re-read'}</button></span>
+      <span class="muted">Read by <button class="link quiet" data-settings title="Change who reads PRs">${esc(pretty(s.meta.model))}</button> in ${clock(s.meta.ms)}${s.meta.from ? ` · <span title="Only the commits after ${esc(s.meta.from.slice(0, 7))} were read; the rest of the tour carried over">updated from <code>${esc(s.meta.from.slice(0, 7))}</code></span>` : ''} · <button class="link${stale() ? ' strong' : ''}" data-fresh title="Read the whole PR again with ${esc(reader())}">${stale() ? `Re-read with ${esc(reader())}` : 'Re-read all'}</button></span>
       <span class="keys"><kbd>j</kbd><kbd>k</kbd> move <kbd>x</kbd> understood <kbd>/</kbd> open</span>`;
   }
 
@@ -506,17 +506,49 @@
   // Server-side syntax colours: only accept text and highlight.js <span class="…"> wrappers, never other markup.
   const colored = (hl) => (typeof hl === 'string' && /^(?:[^<]|<span class="[\w -]+">|<\/span>)*$/.test(hl) ? hl : null);
 
+  // Side by side: context lines sit on both sides; a run of deletions is paired row by row with the additions
+  // that follow it, so each removed line faces the line that replaced it. Returns [{ l, r }] line indexes (or null).
+  function pairs(lines) {
+    const out = [];
+    for (let i = 0; i < lines.length;) {
+      if (lines[i][0] === ' ') { out.push({ l: i, r: i }); i++; continue; }
+      const dels = [], adds = [];
+      while (i < lines.length && lines[i][0] === '-') dels.push(i++);
+      while (i < lines.length && lines[i][0] === '+') adds.push(i++);
+      for (let k = 0; k < Math.max(dels.length, adds.length); k++) out.push({ l: dels[k] ?? null, r: adds[k] ?? null });
+    }
+    return out;
+  }
+  const diffView = () => (store.get('diff', 'unified') === 'split' && !matchMedia('(max-width: 860px)').matches ? 'split' : 'unified');
+  const diffBar = () => `<div class="code-bar"><span class="seg-btns" role="group" aria-label="Diff view">${[['unified', 'Unified'], ['split', 'Split']].map(([k, l]) => `<button type="button" data-diff="${k}" class="${store.get('diff', 'unified') === k ? 'on' : ''}" aria-pressed="${store.get('diff', 'unified') === k}">${l}</button>`).join('')}</span></div>`;
+
+  function splitRows(h, marks, long, MAX) {
+    const side = (i, which) => {
+      if (i == null) return `<td class="ln empty"></td><td class="sg empty"></td><td class="tx empty"></td>`;
+      const [s, o, n, t, hl] = h.lines[i], c = s === '+' ? 'add' : s === '-' ? 'del' : '';
+      return `<td class="ln ${c}">${(which === 'l' ? o : n) ?? ''}</td><td class="sg ${c}">${s === ' ' ? '' : s === '-' ? '−' : '+'}</td><td class="tx ${c}">${colored(hl) ?? esc(t)}</td>`;
+    };
+    return pairs(h.lines).map(({ l, r }) => {
+      const idx = [l, r].filter((x) => x != null), rows = idx.map((x) => x + 1);
+      const on = marks.filter((m) => rows.some((x) => x >= m.from && x <= m.to)), first = marks.find((m) => rows.includes(m.from));
+      const cls = [long && idx.every((x) => x >= MAX) ? 'more' : '', on.length ? 'pt' : ''].filter(Boolean).join(' ');
+      return `<tr${cls ? ` class="${cls}"` : ''}${on.length ? ` data-pts="${on.map((m) => m.k).join(' ')}"` : ''}><td class="pg">${first ? `<span class="pb" data-pt="${first.k}">${first.k}</span>` : ''}</td>${side(l, 'l')}${side(r, 'r')}</tr>`;
+    }).join('');
+  }
+
   // marks: [{ k, from, to }] in 1-based rows. Marked rows get a gutter number and stay visible even in long hunks.
   function hunk(pr, f, h, marks = []) {
     const MAX = 80, long = h.lines.length > MAX + 20 && !marks.some((m) => m.to > MAX), L = LETTER[f.status] || 'M';
-    const rows = h.lines.map(([s, o, n, t, hl], i) => {
+    // A hunk that only adds has nothing to set side by side, so it stays unified.
+    const split = diffView() === 'split' && h.lines.some((l) => l[0] === '-');
+    const rows = split ? splitRows(h, marks, long, MAX) : h.lines.map(([s, o, n, t, hl], i) => {
       const on = marks.filter((m) => i + 1 >= m.from && i + 1 <= m.to), first = marks.find((m) => m.from === i + 1);
       const cls = [s === '+' ? 'add' : s === '-' ? 'del' : '', long && i >= MAX ? 'more' : '', on.length ? 'pt' : ''].filter(Boolean).join(' ');
       return `<tr${cls ? ` class="${cls}"` : ''}${on.length ? ` data-pts="${on.map((m) => m.k).join(' ')}"` : ''}><td class="pg">${first ? `<span class="pb" data-pt="${first.k}">${first.k}</span>` : ''}</td><td class="ln">${o ?? ''}</td><td class="ln">${n ?? ''}</td><td class="sg">${s === ' ' ? '' : s === '-' ? '−' : '+'}</td><td class="tx">${colored(hl) ?? esc(t)}</td></tr>`;
     }).join('');
     return `<div class="hunk${marks.length ? ' marked' : ''}" id="h-${h.id}">
       <div class="hh"><span class="st st-${L}" title="${esc(f.status)}">${L}</span><a class="p" href="${esc(h.id[0] === 'd' && pr.since ? pr.since.compare : `${pr.url}/files`)}#${f.anchor}" target="_blank" rel="noopener" title="Open on GitHub">${pathHtml(f.path)}</a><span class="at">${h.at ? esc(h.at) : `line ${h.start}`}</span><span class="n">${delta(h.add, h.del)}</span></div>
-      <div class="scroll"><table class="diff"><tbody>${rows}</tbody></table></div>
+      <div class="scroll"><table class="diff${split ? ' split' : ''}">${split ? '<colgroup><col class="c-pg"><col class="c-ln"><col class="c-sg"><col><col class="c-ln"><col class="c-sg"><col></colgroup>' : ''}<tbody>${rows}</tbody></table></div>
       ${long ? `<button class="expand" data-expand>${h.lines.length - MAX} more lines</button>` : ''}
     </div>`;
   }
@@ -841,54 +873,30 @@
 
   const GH_MARK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>';
 
-  // The hero is a sea chart of the voyage the name comes from: Troy to Ithaca. The graticule is true to scale
-  // (east to the right), and each leg is a step a review passes through, ending at merge.
-  const LON = (lon) => 150 + (lon - 20.72) * 97.8, LAT = (lat) => 250 - (lat - 38.37) * 101.3;
-  const ROUTE = [['the entry point', 690, 92], ['what it calls', 590, 196], ['the data it writes', 478, 104], ['why it exists', 372, 226], ['what to verify', 262, 132], ['merge', 150, 250]];
-  const ISLAND = 'M-34,-6 C-30,-26 -6,-30 10,-22 C28,-14 36,2 26,16 C14,30 -12,28 -24,18 C-34,10 -38,4 -34,-6 Z';
-  function routeSVG() {
-    const d = ROUTE.reduce((acc, [, x, y], i) => {
-      if (!i) return `M${x},${y}`;
-      const [, px, py] = ROUTE[i - 1], mx = (px + x) / 2;
-      return `${acc} C${mx},${py} ${mx},${y} ${x},${y}`;
-    }, '');
-    const lons = [21, 22, 23, 24, 25, 26].map((v) => [v, LON(v)]), lats = [38.5, 39, 39.5, 40].map((v) => [v, LAT(v)]);
-    const island = (x, y, sc) => `<g transform="translate(${x},${y}) scale(${sc})">${[1.9, 1.45, 1].map((k, i) => `<path class="${i === 2 ? 'land' : 'depth'}" d="${ISLAND}" transform="scale(${k})"/>`).join('')}</g>`;
-    return `<svg class="route-art" viewBox="0 0 760 340" preserveAspectRatio="xMaxYMid meet" aria-hidden="true">
-      <g class="grat">${lons.map(([v, x]) => `<line x1="${x}" y1="20" x2="${x}" y2="330"/><text x="${x}" y="14">${v}°E</text>`).join('')}${lats.map(([v, y]) => `<line x1="110" y1="${y}" x2="740" y2="${y}"/><text x="748" y="${y + 3}">${String(v).replace('.5', '°30′')}${String(v).includes('.') ? '' : '°'}N</text>`).join('')}</g>
-      ${island(118, 278, 0.9)}${island(712, 64, 0.8)}
-      <path class="route-line" d="${d}" pathLength="1"/>
-      ${ROUTE.map(([t, x, y], i) => `<g class="wp${i === ROUTE.length - 1 ? ' end' : ''}" style="--i:${i}"><circle cx="${x}" cy="${y}" r="${i === ROUTE.length - 1 ? 6 : 4.5}"/><text x="${x}" y="${y - 13}" text-anchor="middle">${i + 1 < ROUTE.length ? `${String(i + 1).padStart(2, '0')} ` : ''}${t}</text></g>`).join('')}
-      <text class="port" x="690" y="118" text-anchor="middle">TROY · 39°57′N 26°14′E</text>
-      <text class="port" x="150" y="276" text-anchor="middle">ITHACA · 38°22′N 20°43′E</text>
-    </svg>`;
-  }
-
   // The same sequence diagram the app draws, frozen on one hop for the page.
   function seqAt(sc, nodes, i) { const k = play.i; play.i = i; const svg = seqSVG(sc, nodes); play.i = k; return svg; }
 
-  function landingRows(demo) {
-    const st = demo.story, it = st.intent;
-    const verdicts = st.stops.filter((x) => x.necessity).slice(0, 4).map((x) => `<li><div class="v-head">${needIc(x.necessity.verdict)}<b>${esc(x.title)}</b><span class="need-w">${NEED[x.necessity.verdict][0]}</span></div><p>${prose(x.necessity.reason)}</p></li>`).join('');
-    const reqs = (it?.items || []).map((r) => { const [l, t, g] = STATUS[r.status] || ['', '', 'dot']; return `<li class="${t}"><span class="ri">${ic(g, t)}</span><div><p class="rq">${prose(r.requirement)} <span class="rs">${l}</span></p><p class="re">${prose(r.evidence)}</p></div></li>`; }).join('');
-    const sc = st.scenarios?.[0];
-    return `
-      <section class="l-row">
-        <div class="l-copy"><p class="l-leg">Leg 2</p><h2>Every change has to earn its place.</h2>
-          <p>Each part of the PR is measured against the goal it was written for, and marked needed, supporting or questionable. The reason is written so you can paste it straight into your review.</p></div>
-        <div class="l-visual"><ul class="verdicts">${verdicts}</ul></div>
-      </section>
-      ${sc ? `<section class="l-row flip">
-        <div class="l-copy"><p class="l-leg">Leg 3</p><h2>Press play on the runtime.</h2>
-          <p>Follow a request hop by hop: who calls whom, what data moves, and what happens when a condition holds. On the map or as a sequence diagram, with the code for every hop.</p>
-          <p class="l-cite">${esc(sc.title)}. ${prose(sc.trigger)}</p></div>
-        <div class="l-visual seq-card">${seqAt(sc, st.flow.nodes, Math.min(3, sc.steps.length - 1))}</div>
-      </section>` : ''}
-      ${reqs ? `<section class="l-row">
-        <div class="l-copy"><p class="l-leg">Leg 4</p><h2>Check it against the ticket.</h2>
-          <p>Requirements from the linked issue, ticked off against the code that meets them. The gaps get listed too, which is usually where the review is.</p></div>
-        <div class="l-visual"><ul class="reqs">${reqs}</ul></div>
-      </section>` : ''}`;
+  // Feature cards for the landing page. Every visual is drawn from the demo tour, never mocked.
+  function bento(demo) {
+    const st = demo.story, pr = demo.pr, sc = st.scenarios?.[0];
+    const total = pr.files.reduce((n, f) => n + f.hunks.length, 0), covered = new Set(st.stops.flatMap((x) => x.hunks)).size;
+    const card = (span, vis, h, p) => `<article class="b-card s${span}"><div class="b-vis">${vis}</div><div class="b-txt"><h3>${h}</h3><p>${p}</p></div></article>`;
+    const s0 = st.stops[0];
+    const stops = `<div class="b-stops"><ol>${st.stops.map((x, i) => `<li class="${i ? '' : 'on'}"><span class="b-n">${i + 1}</span>${esc(x.title)}<em>${x.hunks.length}</em></li>`).join('')}</ol>
+      <div class="b-pts"><p class="b-k">Stop 1 · ${esc(s0.title)}</p>${s0.points.slice(0, 3).map((x, i) => `<p><span class="pb">${i + 1}</span><span>${prose(x.text)}</span></p>`).join('')}</div></div>`;
+    const hunksVis = `<div class="b-big"><b>${covered}<span>/${total}</span></b><div class="b-bar">${Array.from({ length: total }, (_, i) => `<i class="${i < covered ? 'on' : ''}"></i>`).join('')}</div><p>hunks explained in this tour</p></div>`;
+    const verdicts = `<ul class="b-list">${st.stops.filter((x) => x.necessity).slice(0, 4).map((x) => `<li>${needIc(x.necessity.verdict)}<span>${esc(x.title)}</span><em>${NEED[x.necessity.verdict][0]}</em></li>`).join('')}</ul>`;
+    const reqs = `<ul class="b-list">${(st.intent?.items || []).slice(0, 4).map((r) => { const [l, t, g] = STATUS[r.status] || ['', '', 'dot']; return `<li class="${t}">${ic(g, t)}<span>${prose(r.requirement)}</span><em>${l}</em></li>`; }).join('')}</ul>`;
+    // ponytail: the demo has no second tour, so the last commit plays "new since you last looked"
+    const commits = `<ul class="b-list b-commits">${pr.commits.map((c, i) => `<li><i class="b-dot"></i><span>${esc(typeof c === 'string' ? c : c.message || '')}</span>${i === pr.commits.length - 1 ? '<em class="b-new">New</em>' : '<em>Toured</em>'}</li>`).join('')}</ul>`;
+    return [
+      card(4, stops, 'Read it in the order it runs.', 'The diff is split into stops, starting where execution starts. Each sentence is pinned to the lines it describes.'),
+      card(2, hunksVis, 'Nothing in the diff is skipped.', 'Odyssey counts coverage itself, without the model. If no stop explains a hunk, it is listed separately so you still read it.'),
+      card(2, verdicts, 'Is each change needed?', 'Each part is marked needed, supporting or questionable, with a reason you can paste into your review.'),
+      sc ? card(4, `<div class="b-seq">${seqAt(sc, st.flow.nodes, Math.min(3, sc.steps.length - 1))}</div>`, 'Step through a request.', `Follow one request call by call, on a map or as a sequence diagram. This one: ${esc(sc.title.toLowerCase())}.`) : '',
+      st.intent?.items?.length ? card(3, reqs, 'Checked against the linked issue.', 'Each requirement in the issue is matched to the code that meets it. Requirements with no matching code are listed too.') : '',
+      pr.commits?.length ? card(3, commits, 'Only the new commits.', 'After a push, Odyssey opens on the commits you haven\'t seen yet.') : '',
+    ].join('');
   }
 
   async function landing() {
@@ -904,52 +912,48 @@
       : `<a class="l-btn" href="/auth/login">${GH_MARK}Sign in with GitHub</a><a class="l-link" href="#tour" data-jump="tour">See a real tour</a>`;
     view.innerHTML = `<div class="landing">
       <header class="l-hero">
-        ${routeSVG()}
         <div class="l-hero-in">
-          <h1>Ship what you<br>understand.</h1>
-          <p class="l-sub">AI writes more of every pull request. Odyssey reads each one with you, stop by stop: what changed, why each part is there, how it runs, and what to check before you merge.</p>
+          <h1>Ship what you understand.</h1>
+          <p class="l-sub">Odyssey walks you through a pull request in the order its code runs. At each stop it shows the lines that changed, explains why they're there, and says what to check before you merge.</p>
           <div class="l-cta">${cta}</div>
         </div>
       </header>
 
       <section class="l-window-wrap" id="tour">
-        <div class="l-glow" aria-hidden="true"></div>
         <div class="l-window">
           <div class="l-chrome"><span class="l-dot"></span><span class="l-url">odyssey <span>/</span> <b id="demo-name">loading…</b></span><span class="l-live">Live demo · click around</span></div>
           <div class="app l-app" id="demo-app"><nav class="tour" aria-label="Tour"></nav><section class="note" id="note"></section><section class="code" id="code"></section></div>
         </div>
       </section>
 
-      <section class="l-row l-first">
-        <div class="l-copy"><p class="l-leg">Leg 1</p><h2>Read it in the order it runs.</h2>
-          <p>Odyssey breaks the diff into stops, starting where the code starts. Every sentence points at the lines it describes, and the real diff, coloured like GitHub's, is always right beside it.</p></div>
-        <div class="l-visual l-facts">
-          <div><b>Every hunk accounted for</b><p>Counted without AI. If the tour misses a change, it's listed for you to read.</p></div>
-          <div><b>Only what's new</b><p>After a push, you land on the new commits and nothing else.</p></div>
-          <div><b>A link for every stop</b><p>Send a teammate straight to the part you want to talk about.</p></div>
-        </div>
+      <section class="l-works" aria-label="Works with"><span>Works with</span><b>GitHub</b><b>Claude</b><b>OpenAI</b><b>OpenRouter</b><b>Claude Code</b><b>Codex</b><b>Postgres</b><b>SQLite</b></section>
+
+      <section class="l-feat" id="features">
+        <div class="l-head"><h2>Built for code you didn't write.</h2>
+          <p>Each part of a tour links to the lines it describes, so you can check what it says against the code.</p></div>
+        <div class="bento" id="bento"></div>
       </section>
-      <div id="l-rows"></div>
 
       <section class="l-band" id="security">
-        <h2>Your code, your keys.</h2>
+        <h2>What Odyssey can access</h2>
         <div class="l-trust">
-          <div><b>Read-only GitHub</b><p>A GitHub App your organization installs. Everyone sees exactly the PRs their own account can read.</p></div>
-          <div><b>Bring your own AI</b><p>Anthropic, OpenAI or OpenRouter with your key, or the Claude Code and Codex logins on your own machine. Odyssey has no model of its own.</p></div>
-          <div><b>Kept by your team</b><p>Tours live in your Postgres, so anyone can reopen one without paying for another read. Keys are encrypted at rest.</p></div>
+          <div><b>GitHub, read-only</b><p>Your organization installs a read-only GitHub App. Each person sees only the pull requests their own account can read.</p></div>
+          <div><b>Your AI provider</b><p>Anthropic, OpenAI or OpenRouter with your own key, or the Claude Code and Codex logins on your machine. Odyssey has no model of its own.</p></div>
+          <div><b>Your database</b><p>Tours are saved in your Postgres or SQLite database, so a teammate can reopen one without paying for another read. API keys are encrypted at rest.</p></div>
         </div>
-      </section>
-
-      <section class="l-final">
-        <h2>Ship what you understand.</h2>
-        <p class="l-arrive">Ithaca · 38°22′N 20°43′E</p>
-        ${me?.user ? '<a class="l-btn" href="#/">Open your pull requests</a>' : local ? '' : `<a class="l-btn" href="/auth/login">${GH_MARK}Sign in with GitHub</a>`}
       </section>
 
       <footer class="l-foot">
-        <span class="brand-sm"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="12.5" r="2"/><circle cx="12.5" cy="3.5" r="2"/><path d="M3.5 10.5V8a3 3 0 0 1 3-3h4"/></svg>Odyssey</span>
-        <span>Pull request tours for teams that review AI-written code.</span>
-        <nav><a href="#tour" data-jump="tour">Demo</a><a href="#security" data-jump="security">Security</a>${me?.user ? '<a href="#/">Your pull requests</a>' : local ? '' : '<a href="/auth/login">Sign in</a>'}</nav>
+        <div class="f-top">
+          <div class="f-brand"><span class="brand-sm"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="12.5" r="2"/><circle cx="12.5" cy="3.5" r="2"/><path d="M3.5 10.5V8a3 3 0 0 1 3-3h4"/></svg>Odyssey</span>
+            <h2>Read it before you merge it.</h2>
+            <p>Odyssey explains pull requests for teams that review AI-written code.</p></div>
+          <nav aria-label="Product"><h4>Product</h4><a href="#tour" data-jump="tour">Live demo</a><a href="#features" data-jump="features">Features</a><a href="#security" data-jump="security">Security</a></nav>
+          <nav aria-label="Account"><h4>Account</h4>${me?.user ? '<a href="#/">Your pull requests</a>' : local ? '' : '<a href="/auth/login">Sign in with GitHub</a>'}<a href="#tour" data-jump="tour">See a real tour</a></nav>
+          <div><h4>Bring your AI</h4><span>Claude</span><span>OpenAI</span><span>OpenRouter</span><span>Claude Code</span><span>Codex</span></div>
+        </div>
+        <p class="f-mark" aria-hidden="true">Odys<span>sey</span></p>
+        <div class="f-bot"><span>© 2026 Odyssey</span><span>Read-only GitHub access · Your own AI keys</span></div>
       </footer>
     </div>`;
     try {
@@ -959,9 +963,10 @@
       $('#demo-name').textContent = `${demo.label.replace(/ \(.*/, '')} · ${demo.pr.title}`;
       $('#demo-app .tour').innerHTML = tour();
       show();
-      $('#l-rows').innerHTML = landingRows(demo);
+      $('#bento').innerHTML = bento(demo);
     } catch {
       $('#tour')?.remove();
+      $('#features')?.remove();
     }
   }
 
@@ -982,7 +987,7 @@
     if (e.target.closest?.('[data-signout]')) return signOut();
     const jump = e.target.closest?.('[data-jump]');
     if (jump) { e.preventDefault(); return document.getElementById(jump.dataset.jump)?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); }
-    const t = e.target.closest?.('[data-view],[data-scn],[data-pstep],[data-play],[data-hop],[data-sort],[data-settings],[data-pt],[data-sel],[data-hunk],[data-ack],[data-step],[data-expand],[data-fresh]');
+    const t = e.target.closest?.('[data-diff],[data-view],[data-scn],[data-pstep],[data-play],[data-hop],[data-sort],[data-settings],[data-pt],[data-sel],[data-hunk],[data-ack],[data-step],[data-expand],[data-fresh]');
     if (!t) return;
     const ds = t.dataset;
     if (ds.view) { play.view = ds.view; $$('[data-view]').forEach((b) => { b.classList.toggle('on', b === t); b.setAttribute('aria-pressed', b === t); }); paintView(); }
@@ -990,6 +995,7 @@
     else if (ds.pstep) { stopPlay(); goHop(play.i + +ds.pstep); }
     else if ('play' in ds) togglePlay();
     else if (ds.hop) { stopPlay(); goHop(+ds.hop); }
+    else if (ds.diff) { const y = $('#code')?.scrollTop; store.set('diff', ds.diff); show(); if ($('#code')) $('#code').scrollTop = y; }
     else if (ds.sort) { store.set('sort', ds.sort); lists(); }
     else if ('settings' in ds) openSettings();
     else if (ds.pt) { point(ds.pt, true); if (t.matches('.pb')) $(`.points [data-pt="${ds.pt}"]`)?.scrollIntoView({ block: 'nearest' }); }
@@ -1127,6 +1133,7 @@
   console.assert(refOf('a/b#3') === 'a/b/3' && refOf('a/b') === null, 'refOf short');
   console.assert(prose('use `x<y`') === 'use <code>x&lt;y</code>', 'prose escapes');
   console.assert(clock(72000) === '1:12', 'clock');
+  console.assert(JSON.stringify(pairs([[' '], ['-'], ['-'], ['+'], [' '], ['+']])) === '[{"l":0,"r":0},{"l":1,"r":3},{"l":2,"r":null},{"l":4,"r":4},{"l":null,"r":5}]', 'split pairs');
   console.assert(colored('<span class="hljs-keyword">if</span> x &lt; 1') && !colored('<img src=x onerror=alert(1)>') && !colored('<span onclick="x">a</span>'), 'colored');
   console.assert(effort(5, 3, 1) === 1 && effort(88, 22, 5) === 2 && effort(300, 50, 10) === 3 && effort(3932, 232, 27) === 5, 'effort');
   console.assert(pretty('claude-sonnet-5-5') === 'Sonnet 5.5' && pretty('gpt-x') === 'gpt-x', 'pretty');

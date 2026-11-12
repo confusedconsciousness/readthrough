@@ -225,6 +225,86 @@ const inflight = new Map();
 const readerOf = (cfg) => `${cfg.provider}-${cfg.model || 'default'}`;
 const readingOf = (ref, sha) => [...inflight.entries()].find(([k]) => k.startsWith(`${refKey(ref)}@${sha}#`))?.[1];
 
+// Keep only anchors that exist; clamp rows to the hunk; a point's hunk is always shown with its stop.
+function tidy(s, pr) {
+  const known = new Map([...pr.files, ...(pr.since?.files || [])].flatMap((f) => f.hunks.map((h) => [h.id, h.lines.length])));
+  const pin = (pt) => {
+    const n = known.get(pt.hunk);
+    if (!n) { pt.hunk = ''; return; }
+    pt.from = Math.min(Math.max(1, pt.from), n);
+    pt.to = Math.min(Math.max(pt.from, pt.to), n);
+  };
+  s.since?.points.forEach(pin);
+  const ids = new Set(s.flow.nodes.map((n) => n.id));
+  s.scenarios = (s.scenarios || []).map((sc) => ({
+    ...sc,
+    steps: sc.steps.filter((st) => ids.has(st.from) && ids.has(st.to)).map((st) => {
+      const pt = { hunk: st.hunk, from: st.start, to: st.end };
+      pin(pt);
+      return { ...st, hunk: pt.hunk, start: pt.hunk ? pt.from : 0, end: pt.hunk ? pt.to : 0 };
+    }),
+  })).filter((sc) => sc.steps.length);
+  s.intent?.items.forEach((it) => { if (!known.has(it.hunk)) it.hunk = ''; });
+  for (const st of s.stops) {
+    st.points.forEach(pin);
+    st.hunks = [...new Set([...st.hunks, ...st.points.map((pt) => pt.hunk)])].filter((id) => known.has(id));
+  }
+  // The reviewer's findings are pinned like points; a blocker always means "request changes", whatever the model said.
+  if (s.review) {
+    s.review.findings.forEach(pin);
+    if (s.review.findings.some((f) => f.severity === 'blocker')) s.review.recommendation = 'request_changes';
+  }
+}
+
+// The text of every hunk, stored with the tour so a later commit can find where each anchor moved.
+const anchorsOf = (pr) => Object.fromEntries(pr.files.flatMap((f) => f.hunks.map((h) => [h.id, [f.path, h.lines.map((l) => l[0] + l[3]).join('\n')]])));
+
+// Carry a tour of an older commit onto this one, without AI. Every anchor is re-pinned by finding its exact
+// lines in the current diff; an anchor whose lines the new commits changed is dropped, and so is a stop left
+// with no code. Returns the carried tour, the findings to re-check (unpinned or moved), and the hunks no stop covers.
+function carry(old, pr) {
+  const tour = structuredClone(old), A = old.anchors;
+  delete tour.anchors; delete tour.since;
+  const now = new Map(pr.files.map((f) => [f.path, f.hunks.map((h) => ({ id: h.id, rows: h.lines.map((l) => l[0] + l[3]) }))]));
+  const rows = (id) => A[id]?.[1].split('\n');
+  const range = (id, a, b) => {
+    const seg = rows(id)?.slice(a - 1, b);
+    if (!seg?.length || !a) return null;
+    for (const h of now.get(A[id][0]) || []) {
+      for (let j = 0; j + seg.length <= h.rows.length; j++) if (seg.every((r, k) => h.rows[j + k] === r)) return { hunk: h.id, from: j + 1, to: j + seg.length };
+    }
+    return null;
+  };
+  const hunk = (id) => { // the current hunk sharing the most changed lines with an old one
+    const mine = new Set((rows(id) || []).filter((r) => r[0] !== ' '));
+    let best = null, most = 0;
+    for (const h of now.get(A[id]?.[0]) || []) { const k = h.rows.filter((r) => mine.has(r)).length; if (k > most) [best, most] = [h.id, k]; }
+    return best;
+  };
+  const move = (pt, a = 'from', b = 'to') => {
+    const r = range(pt.hunk, pt[a], pt[b]);
+    if (r) [pt.hunk, pt[a], pt[b]] = [r.hunk, r.from, r.to];
+    else [pt.hunk, pt[a], pt[b]] = ['', 0, 0];
+    return !!r;
+  };
+  const idx = [];
+  let k = 0;
+  tour.stops = tour.stops.filter((st, i) => {
+    st.points = st.points.filter((p) => move(p));
+    st.hunks = [...new Set(st.hunks.map(hunk).filter(Boolean))];
+    idx[i] = st.hunks.length ? k++ : -1;
+    return st.hunks.length > 0;
+  });
+  tour.flow.nodes.forEach((n) => { n.stop = n.stop >= 0 ? idx[n.stop] ?? -1 : -1; });
+  tour.scenarios?.forEach((sc) => sc.steps.forEach((st) => { if (st.hunk) move(st, 'start', 'end'); }));
+  tour.intent?.items.forEach((it) => { it.hunk = (it.hunk && hunk(it.hunk)) || ''; });
+  const open = [];
+  tour.review.findings = tour.review.findings.filter((f) => (f.hunk && move(f)) || (open.push(f), false));
+  const covered = new Set(tour.stops.flatMap((s) => s.hunks));
+  const uncovered = pr.files.filter((f) => !f.generated && !f.nodiff).map((f) => ({ ...f, hunks: f.hunks.filter((h) => !covered.has(h.id)) })).filter((f) => f.hunks.length);
+  return { tour, open, uncovered };
+}
+
 async function story(ctx, ref, fresh) {
   const pr = await loadPR(ctx, ref); // also the access check: GitHub refuses PRs this user can't see
   const cfg = await aiConfig(ctx.user), reader = readerOf(cfg), key = `${refKey(ref)}@${pr.sha}#${reader}`;
@@ -239,37 +319,26 @@ async function story(ctx, ref, fresh) {
   }
   if (inflight.has(key)) return inflight.get(key).job;
   const job = (async () => {
-    const t0 = Date.now();
-    const { s, model } = await ai.analyse(pr, cfg, { local: MODE === 'local' });
-    // Keep only anchors that exist; clamp rows to the hunk; a point's hunk is always shown with its stop.
-    const known = new Map([...pr.files, ...(pr.since?.files || [])].flatMap((f) => f.hunks.map((h) => [h.id, h.lines.length])));
-    const pin = (pt) => {
-      const n = known.get(pt.hunk);
-      if (!n) { pt.hunk = ''; return; }
-      pt.from = Math.min(Math.max(1, pt.from), n);
-      pt.to = Math.min(Math.max(pt.from, pt.to), n);
-    };
-    s.since?.points.forEach(pin);
-    const ids = new Set(s.flow.nodes.map((n) => n.id));
-    s.scenarios = (s.scenarios || []).map((sc) => ({
-      ...sc,
-      steps: sc.steps.filter((st) => ids.has(st.from) && ids.has(st.to)).map((st) => {
-        const pt = { hunk: st.hunk, from: st.start, to: st.end };
-        pin(pt);
-        return { ...st, hunk: pt.hunk, start: pt.hunk ? pt.from : 0, end: pt.hunk ? pt.to : 0 };
-      }),
-    })).filter((sc) => sc.steps.length);
-    s.intent?.items.forEach((it) => { if (!known.has(it.hunk)) it.hunk = ''; });
-    for (const st of s.stops) {
-      st.points.forEach(pin);
-      st.hunks = [...new Set([...st.hunks, ...st.points.map((pt) => pt.hunk)])].filter((id) => known.has(id));
+    const t0 = Date.now(), local = MODE === 'local';
+    // New commits on a toured PR: carry the old tour forward and read only what's new. Re-read (fresh) reads it all.
+    const prev = !fresh && pr.since && !pr.since.rewritten ? await db.previousTour(ref, pr.sha) : null;
+    let s, model, from = null;
+    if (prev?.data.anchors && prev.data.review) { // older tours lack anchors or a review: read those in full once
+      const { tour, open, uncovered } = carry(prev.data, pr);
+      const u = await ai.update(pr, tour, open, uncovered, cfg, { local });
+      ({ model } = u);
+      s = tour;
+      s.since = u.s.since;
+      s.stops.push(...u.s.stops);
+      s.review.findings = [...u.s.findings, ...open.filter((_, i) => u.s.kept.includes(i + 1)), ...s.review.findings];
+      Object.assign(s.review, u.s.review);
+      from = prev.sha;
+    } else {
+      ({ s, model } = await ai.analyse(pr, cfg, { local }));
     }
-    // The reviewer's findings are pinned like points; a blocker always means "request changes", whatever the model said.
-    if (s.review) {
-      s.review.findings.forEach(pin);
-      if (s.review.findings.some((f) => f.severity === 'blocker')) s.review.recommendation = 'request_changes';
-    }
-    s.meta = { sha: pr.sha, provider: cfg.provider, model, ms: Date.now() - t0, at: new Date().toISOString(), ref: pr.ref, title: pr.title, state: pr.state };
+    tidy(s, pr);
+    s.anchors = anchorsOf(pr);
+    s.meta = { sha: pr.sha, provider: cfg.provider, model, ms: Date.now() - t0, at: new Date().toISOString(), ref: pr.ref, title: pr.title, state: pr.state, from };
     await db.putTour(ref, pr.sha, reader, s, ctx.user.id);
     return s;
   })().finally(() => inflight.delete(key));
@@ -472,7 +541,7 @@ async function handle(req, res) {
   if (u.pathname === '/api/pr' || u.pathname === '/api/story') {
     const ref = parseRef(u.searchParams.get('pr'));
     if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
-    if (u.pathname === '/api/story') return send(res, 200, await story(ctx, ref, u.searchParams.has('fresh')));
+    if (u.pathname === '/api/story') { const { anchors, ...s } = await story(ctx, ref, u.searchParams.has('fresh')); return send(res, 200, s); } // anchors stay on the server
     const pr = await loadPR(ctx, ref);
     pr.reading = readingOf(ref, pr.sha)?.since || null; // so a page that comes back mid-read shows the real elapsed time
     return send(res, 200, pr);
@@ -505,3 +574,16 @@ console.assert(!parseRef('a/b') && !parseRef('; rm -rf /'), 'bad ref');
 }
 console.assert(GENERATED.test('web/package-lock.json') && !GENERATED.test('src/lock.js'), 'generated');
 console.assert(TEST.test('src/foo.test.ts') && TEST.test('tests/a.py') && !TEST.test('src/contest.js'), 'tests');
+{
+  // carry: an anchor follows its lines into a moved hunk, a stop whose code is gone is dropped, the rest is left for the update
+  const pr = { files: [{ path: 'a.js', hunks: [{ id: 'f0h0', lines: [['+', 0, 1, 'new()']] }, { id: 'f0h1', lines: [[' ', 1, 2, 'x'], ['+', 0, 3, 'y']] }] }] };
+  const old = {
+    anchors: { f0h0: ['a.js', ' x\n+y'], f0h1: ['b.js', '+gone'] },
+    stops: [{ hunks: ['f0h0'], points: [{ hunk: 'f0h0', from: 2, to: 2 }] }, { hunks: ['f0h1'], points: [] }],
+    flow: { nodes: [{ stop: 1 }, { stop: 0 }] }, scenarios: [], review: { findings: [{ hunk: 'f0h1', from: 1, to: 1 }] },
+  };
+  const { tour, open, uncovered } = carry(old, pr);
+  console.assert(tour.stops.length === 1 && tour.stops[0].hunks[0] === 'f0h1' && tour.stops[0].points[0].from === 2, 'carry re-pins');
+  console.assert(tour.flow.nodes[0].stop === -1 && tour.flow.nodes[1].stop === 0 && open.length === 1, 'carry drops');
+  console.assert(uncovered.length === 1 && uncovered[0].hunks.map((h) => h.id).join() === 'f0h0', 'carry uncovered');
+}
