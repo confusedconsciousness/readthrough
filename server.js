@@ -17,25 +17,22 @@ const MODE = process.env.GITHUB_CLIENT_ID ? 'hosted' : 'local';
 const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
 const HOST = process.env.HOST || (MODE === 'hosted' ? '0.0.0.0' : '127.0.0.1');
 const SECURE = PUBLIC_URL.startsWith('https://');
-// Settings are READTHROUGH_*; the ODYSSEY_* names from before the rename still work.
-const env = (k) => process.env[`READTHROUGH_${k}`] ?? process.env[`ODYSSEY_${k}`];
-const ALLOWED = (env('ALLOWED_ORGS') || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+const ALLOWED = (process.env.READTHROUGH_ALLOWED_ORGS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const APP_SLUG = process.env.GITHUB_APP_SLUG || '';
 
 function fail(msg) { console.error(`readthrough: ${msg}`); process.exit(1); }
-// Postgres when DATABASE_URL is set; otherwise SQLite in one file (default ./readthrough.db, or an existing ./odyssey.db).
-const kept = (now, before) => (fs.existsSync(path.join(__dirname, before)) ? path.join(__dirname, before) : path.join(__dirname, now));
-const SQLITE = env('SQLITE') || kept('readthrough.db', 'odyssey.db');
+// Postgres when DATABASE_URL is set; otherwise SQLite in one file (default ./readthrough.db).
+const SQLITE = process.env.READTHROUGH_SQLITE || path.join(__dirname, 'readthrough.db');
 if (MODE === 'hosted') {
   if (!process.env.GITHUB_CLIENT_SECRET) fail('hosted mode needs GITHUB_CLIENT_SECRET from your GitHub App.');
   if (!process.env.PUBLIC_URL) fail('hosted mode needs PUBLIC_URL, e.g. https://readthrough.example.com');
-  if ((env('SECRET') || '').length < 32) fail('hosted mode needs READTHROUGH_SECRET, 32+ random characters (openssl rand -base64 48).');
+  if ((process.env.READTHROUGH_SECRET || '').length < 32) fail('hosted mode needs READTHROUGH_SECRET, 32+ random characters (openssl rand -base64 48).');
 }
 
 // Locally the sealing secret is generated once and kept next to the app, readable only by you.
 function secret() {
-  if (env('SECRET')) return env('SECRET');
-  const f = kept('.readthrough-secret', '.odyssey-secret'); // an existing secret must be kept, or saved keys can't be read
+  if (process.env.READTHROUGH_SECRET) return process.env.READTHROUGH_SECRET;
+  const f = path.join(__dirname, '.readthrough-secret');
   if (!fs.existsSync(f)) fs.writeFileSync(f, crypto.randomBytes(48).toString('base64'), { mode: 0o600 });
   return fs.readFileSync(f, 'utf8').trim();
 }
@@ -413,7 +410,7 @@ async function context(req) {
     localUser.catch(() => { localUser = null; });
     return { user: await localUser, token };
   }
-  const user = await db.sessionUser(cookies(req).odyssey_sid);
+  const user = await db.sessionUser(cookies(req).readthrough_sid);
   return user && { user, token: await freshToken(user) };
 }
 
@@ -478,7 +475,7 @@ const escHTML = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<'
 
 async function signIn(req, res, u) {
   const c = cookies(req), state = u.searchParams.get('state') || '';
-  const ok = c.odyssey_state && state.length === c.odyssey_state.length && crypto.timingSafeEqual(Buffer.from(state), Buffer.from(c.odyssey_state));
+  const ok = c.readthrough_state && state.length === c.readthrough_state.length && crypto.timingSafeEqual(Buffer.from(state), Buffer.from(c.readthrough_state));
   if (!ok || !u.searchParams.get('code')) return send(res, 400, page('Sign-in failed', 'The sign-in link expired or was opened in another browser. Try again.'), TYPES.html);
   try {
     const tokens = await auth.fromCode(u.searchParams.get('code'));
@@ -491,7 +488,7 @@ async function signIn(req, res, u) {
     }
     const user = await db.upsertUser(me, tokens);
     const sid = await db.createSession(user.id);
-    return redirect(res, '/#/', [cookie('odyssey_sid', sid, 30 * 86400), cookie('odyssey_state', '', 0)]);
+    return redirect(res, '/#/', [cookie('readthrough_sid', sid, 30 * 86400), cookie('readthrough_state', '', 0)]);
   } catch (e) {
     return send(res, 502, page('Sign-in failed', escHTML(e.message)), TYPES.html);
   }
@@ -515,12 +512,12 @@ async function handle(req, res) {
   if (u.pathname === '/auth/login' && req.method === 'GET') {
     if (MODE === 'local') return redirect(res, '/');
     const state = crypto.randomBytes(24).toString('base64url');
-    return redirect(res, auth.authorizeURL(state), [cookie('odyssey_state', state, 600)]);
+    return redirect(res, auth.authorizeURL(state), [cookie('readthrough_state', state, 600)]);
   }
   if (u.pathname === '/auth/callback' && req.method === 'GET' && MODE === 'hosted') return signIn(req, res, u);
   if (u.pathname === '/auth/logout' && req.method === 'POST') {
-    await db.deleteSession(cookies(req).odyssey_sid);
-    return send(res, 200, { ok: true }, undefined, { 'set-cookie': cookie('odyssey_sid', '', 0) });
+    await db.deleteSession(cookies(req).readthrough_sid);
+    return send(res, 200, { ok: true }, undefined, { 'set-cookie': cookie('readthrough_sid', '', 0) });
   }
 
   if (!u.pathname.startsWith('/api/')) return send(res, 404, page('Not found', 'There is nothing at this address.'), TYPES.html);

@@ -12,9 +12,8 @@
   let me = null;    // { mode: 'hosted'|'local', user, installs, installURL } from /api/me
 
   const store = {
-    // ponytail: storage keys keep the pre-rename prefix so saved choices survive; nobody sees them
-    get: (k, d) => { try { return JSON.parse(localStorage.getItem('odyssey:' + k)) ?? d; } catch { return d; } },
-    set: (k, v) => { try { localStorage.setItem('odyssey:' + k, JSON.stringify(v)); } catch {} },
+    get: (k, d) => { try { return JSON.parse(localStorage.getItem('readthrough:' + k)) ?? d; } catch { return d; } },
+    set: (k, v) => { try { localStorage.setItem('readthrough:' + k, JSON.stringify(v)); } catch {} },
   };
   const doneKey = () => `done:${cur.key}@${cur.story.meta.sha}`;
   const done = () => new Set(cur?.story ? store.get(doneKey(), []) : []);

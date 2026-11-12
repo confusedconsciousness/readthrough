@@ -7,7 +7,7 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 const Anthropic = require('@anthropic-ai/sdk');
 
-const EFFORT = process.env.READTHROUGH_EFFORT || process.env.ODYSSEY_EFFORT || 'high';
+const EFFORT = process.env.READTHROUGH_EFFORT || 'high';
 
 function run(cmd, args, { input, timeout = 60_000, cwd } = {}) {
   return new Promise((resolve, reject) => {

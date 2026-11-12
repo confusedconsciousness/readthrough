@@ -99,7 +99,6 @@ Put it behind HTTPS (your load balancer or reverse proxy) at `PUBLIC_URL`. Cooki
 - GitHub access is read-only and per person; GitHub decides what each person can see.
 - Sessions are random 256-bit cookies (HttpOnly, SameSite=Lax); the database stores only their SHA-256.
 - GitHub tokens and AI keys are encrypted at rest. Rotating `READTHROUGH_SECRET` signs everyone out and forgets saved keys.
-- Readthrough was called Odyssey before. The old `ODYSSEY_*` settings, `.odyssey-secret` and `odyssey.db` still work, so an existing install keeps its data and sign-ins.
 - The API refuses cross-site requests; pages are served with a strict Content-Security-Policy and `frame-ancestors 'none'`.
 - The PR's diff, description, commits and linked issues are sent to the AI each person chooses, with their key.
 

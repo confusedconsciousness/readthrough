@@ -1,10 +1,9 @@
 .cache/
 .cache.imported/
+# pre-database AI settings file; no longer read, but it holds a key, so keep it out of git
 .odyssey.json
-.odyssey-secret
 node_modules/
 .env
 !.env.example
-odyssey.db*
 .readthrough-secret
 readthrough.db*

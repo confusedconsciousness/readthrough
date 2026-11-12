@@ -1,9 +1,8 @@
 node_modules
 .env
 .cache*
-.odyssey*
+.odyssey.json
 .git
 .claude
-odyssey.db*
 .readthrough*
 readthrough.db*
