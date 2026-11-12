@@ -378,7 +378,7 @@ const BASE_HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'n
 
 function send(res, code, body, type = 'application/json; charset=utf-8', headers = {}) {
   res.writeHead(code, { ...BASE_HEADERS, 'content-type': type, ...(type.startsWith('text/html') && { 'content-security-policy': CSP }), ...headers });
-  res.end(typeof body === 'string' ? body : JSON.stringify(body));
+  res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
 }
 const redirect = (res, to, cookies = []) => { res.writeHead(302, { ...BASE_HEADERS, location: to, 'set-cookie': cookies }); res.end(); };
 
@@ -429,6 +429,11 @@ async function handle(req, res) {
   const site = req.headers['sec-fetch-site'];
   if ((u.pathname.startsWith('/api/') || req.method !== 'GET') && site && !['same-origin', 'none'].includes(site)) return send(res, 403, { error: 'Cross-site request refused' });
 
+  // The display typeface, self-hosted (SIL OFL, see fonts/OFL.txt) so pages make no outside font requests.
+  const FONTS = { '/fonts/schibsted-600.woff2': 1, '/fonts/schibsted-700.woff2': 1 };
+  if (req.method === 'GET' && FONTS[u.pathname]) {
+    return send(res, 200, fs.readFileSync(path.join(__dirname, u.pathname)), 'font/woff2', { 'cache-control': 'public, max-age=31536000, immutable' });
+  }
   if (req.method === 'GET' && STATIC[u.pathname]) {
     const f = STATIC[u.pathname];
     return send(res, 200, fs.readFileSync(path.join(__dirname, f), 'utf8'), TYPES[f.split('.').pop()]);

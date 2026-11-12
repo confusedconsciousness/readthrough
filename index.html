@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Odyssey</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='3.5' cy='12.5' r='2' fill='%2357606a'/%3E%3Ccircle cx='12.5' cy='3.5' r='2' fill='%2357606a'/%3E%3Cpath d='M3.5 10.5V8a3 3 0 0 1 3-3h4' fill='none' stroke='%2357606a' stroke-width='1.5'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='3.5' cy='12.5' r='2' fill='%23c8962f'/%3E%3Ccircle cx='12.5' cy='3.5' r='2' fill='%23c8962f'/%3E%3Cpath d='M3.5 10.5V8a3 3 0 0 1 3-3h4' fill='none' stroke='%23c8962f' stroke-width='1.5'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
-<script>try { const t = JSON.parse(localStorage.getItem('odyssey:theme')); if (t) document.documentElement.dataset.theme = t } catch {}</script>
+<script>try { const r = document.documentElement, t = JSON.parse(localStorage.getItem('odyssey:theme')), v = JSON.parse(localStorage.getItem('odyssey:vars')); if (t) r.dataset.theme = t; if (v) for (const k in v) r.style.setProperty(k, v[k]) } catch {}</script>
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="#" aria-label="Odyssey home">
+  <a class="brand" href="#/" aria-label="Your tours">
     <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="12.5" r="2"/><circle cx="12.5" cy="3.5" r="2"/><path d="M3.5 10.5V8a3 3 0 0 1 3-3h4"/></svg>
     <span>Odyssey</span>
   </a>
@@ -23,9 +23,12 @@
   <button id="gear" class="icon" aria-label="Choose the AI that reads PRs" title="Choose the AI that reads PRs">
     <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.5"/><circle cx="5.5" cy="11.5" r="1.5"/></svg>
   </button>
-  <button id="theme" class="icon" aria-label="Toggle dark mode" title="Toggle dark mode">
-    <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" class="fill"/></svg>
-  </button>
+  <details class="menu" id="appearance">
+    <summary class="icon" aria-label="Appearance: mode and palette" title="Appearance">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" class="fill"/></svg>
+    </summary>
+    <div class="menu-pop appearance-pop" id="appearance-pop"></div>
+  </details>
 </header>
 <main id="view"></main>
 <footer class="status" id="status"></footer>

@@ -78,7 +78,8 @@
   }
 
   function route() {
-    if (!me?.user || location.hash === '#/about') return landing();
+    // The bare address is the front door: the landing page. The app itself lives under #/ (your tours) and #/owner/repo/n.
+    if (!me?.user || ['', '#', '#/about'].includes(location.hash)) return landing();
     const h = parse();
     document.body.dataset.view = h ? 'pr' : 'home';
     if (!h) return home();
@@ -840,17 +841,26 @@
 
   const GH_MARK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>';
 
-  // The hero's voyage: a route with a waypoint for each thing a review should pass through.
-  const ROUTE = [['the entry point', 150, 210], ['what it calls', 250, 110], ['the data it writes', 360, 230], ['why it exists', 470, 90], ['what to verify', 580, 200], ['merge', 670, 50]];
+  // The hero is a sea chart of the voyage the name comes from: Troy to Ithaca. The graticule is true to scale
+  // (east to the right), and each leg is a step a review passes through, ending at merge.
+  const LON = (lon) => 150 + (lon - 20.72) * 97.8, LAT = (lat) => 250 - (lat - 38.37) * 101.3;
+  const ROUTE = [['the entry point', 690, 92], ['what it calls', 590, 196], ['the data it writes', 478, 104], ['why it exists', 372, 226], ['what to verify', 262, 132], ['merge', 150, 250]];
+  const ISLAND = 'M-34,-6 C-30,-26 -6,-30 10,-22 C28,-14 36,2 26,16 C14,30 -12,28 -24,18 C-34,10 -38,4 -34,-6 Z';
   function routeSVG() {
     const d = ROUTE.reduce((acc, [, x, y], i) => {
       if (!i) return `M${x},${y}`;
       const [, px, py] = ROUTE[i - 1], mx = (px + x) / 2;
       return `${acc} C${mx},${py} ${mx},${y} ${x},${y}`;
     }, '');
+    const lons = [21, 22, 23, 24, 25, 26].map((v) => [v, LON(v)]), lats = [38.5, 39, 39.5, 40].map((v) => [v, LAT(v)]);
+    const island = (x, y, sc) => `<g transform="translate(${x},${y}) scale(${sc})">${[1.9, 1.45, 1].map((k, i) => `<path class="${i === 2 ? 'land' : 'depth'}" d="${ISLAND}" transform="scale(${k})"/>`).join('')}</g>`;
     return `<svg class="route-art" viewBox="0 0 760 340" preserveAspectRatio="xMaxYMid meet" aria-hidden="true">
+      <g class="grat">${lons.map(([v, x]) => `<line x1="${x}" y1="20" x2="${x}" y2="330"/><text x="${x}" y="14">${v}°E</text>`).join('')}${lats.map(([v, y]) => `<line x1="110" y1="${y}" x2="740" y2="${y}"/><text x="748" y="${y + 3}">${String(v).replace('.5', '°30′')}${String(v).includes('.') ? '' : '°'}N</text>`).join('')}</g>
+      ${island(118, 278, 0.9)}${island(712, 64, 0.8)}
       <path class="route-line" d="${d}" pathLength="1"/>
-      ${ROUTE.map(([t, x, y], i) => `<g class="wp" style="--i:${i}"><circle cx="${x}" cy="${y}" r="${i === ROUTE.length - 1 ? 7 : 5}"/><text x="${x + 12}" y="${y - 10}">${i + 1 < ROUTE.length ? `${String(i + 1).padStart(2, '0')} ` : ''}${t}</text></g>`).join('')}
+      ${ROUTE.map(([t, x, y], i) => `<g class="wp${i === ROUTE.length - 1 ? ' end' : ''}" style="--i:${i}"><circle cx="${x}" cy="${y}" r="${i === ROUTE.length - 1 ? 6 : 4.5}"/><text x="${x}" y="${y - 13}" text-anchor="middle">${i + 1 < ROUTE.length ? `${String(i + 1).padStart(2, '0')} ` : ''}${t}</text></g>`).join('')}
+      <text class="port" x="690" y="118" text-anchor="middle">TROY · 39°57′N 26°14′E</text>
+      <text class="port" x="150" y="276" text-anchor="middle">ITHACA · 38°22′N 20°43′E</text>
     </svg>`;
   }
 
@@ -864,18 +874,18 @@
     const sc = st.scenarios?.[0];
     return `
       <section class="l-row">
-        <div class="l-copy"><h2>Every change has to earn its place.</h2>
+        <div class="l-copy"><p class="l-leg">Leg 2</p><h2>Every change has to earn its place.</h2>
           <p>Each part of the PR is measured against the goal it was written for, and marked needed, supporting or questionable. The reason is written so you can paste it straight into your review.</p></div>
         <div class="l-visual"><ul class="verdicts">${verdicts}</ul></div>
       </section>
       ${sc ? `<section class="l-row flip">
-        <div class="l-copy"><h2>Press play on the runtime.</h2>
+        <div class="l-copy"><p class="l-leg">Leg 3</p><h2>Press play on the runtime.</h2>
           <p>Follow a request hop by hop: who calls whom, what data moves, and what happens when a condition holds. On the map or as a sequence diagram, with the code for every hop.</p>
           <p class="l-cite">${esc(sc.title)}. ${prose(sc.trigger)}</p></div>
         <div class="l-visual seq-card">${seqAt(sc, st.flow.nodes, Math.min(3, sc.steps.length - 1))}</div>
       </section>` : ''}
       ${reqs ? `<section class="l-row">
-        <div class="l-copy"><h2>Check it against the ticket.</h2>
+        <div class="l-copy"><p class="l-leg">Leg 4</p><h2>Check it against the ticket.</h2>
           <p>Requirements from the linked issue, ticked off against the code that meets them. The gaps get listed too, which is usually where the review is.</p></div>
         <div class="l-visual"><ul class="reqs">${reqs}</ul></div>
       </section>` : ''}`;
@@ -911,7 +921,7 @@
       </section>
 
       <section class="l-row l-first">
-        <div class="l-copy"><h2>Read it in the order it runs.</h2>
+        <div class="l-copy"><p class="l-leg">Leg 1</p><h2>Read it in the order it runs.</h2>
           <p>Odyssey breaks the diff into stops, starting where the code starts. Every sentence points at the lines it describes, and the real diff, coloured like GitHub's, is always right beside it.</p></div>
         <div class="l-visual l-facts">
           <div><b>Every hunk accounted for</b><p>Counted without AI. If the tour misses a change, it's listed for you to read.</p></div>
@@ -932,6 +942,7 @@
 
       <section class="l-final">
         <h2>Ship what you understand.</h2>
+        <p class="l-arrive">Ithaca · 38°22′N 20°43′E</p>
         ${me?.user ? '<a class="l-btn" href="#/">Open your pull requests</a>' : local ? '' : `<a class="l-btn" href="/auth/login">${GH_MARK}Sign in with GitHub</a>`}
       </section>
 
@@ -1029,12 +1040,77 @@
   });
   document.addEventListener('mouseout', (e) => { if (e.target.closest?.('.map svg') && !e.relatedTarget?.closest?.('.map svg')) e.target.closest('svg').classList.remove('focus'); });
 
-  $('#theme').addEventListener('click', () => {
-    const root = document.documentElement;
-    const dark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
-    root.dataset.theme = dark ? 'light' : 'dark';
-    store.set('theme', root.dataset.theme);
+  // ---------- appearance: palette and light/dark ----------
+
+  // A palette is two token sets, one per mode. Unset tokens fall back to the stylesheet (diff colours, status colours,
+  // GitHub-style syntax colours), so only Monokai brings its own syntax colours.
+  const N = (bg, bg2, bg3, line, line2, fg, fg2, fg3) => ({ '--bg': bg, '--bg-2': bg2, '--bg-3': bg3, '--line': line, '--line-2': line2, '--fg': fg, '--fg-2': fg2, '--fg-3': fg3 });
+  const A = (accent, wash, brand, on) => ({ '--blue': accent, '--blue-bg': wash, '--brand': brand || accent, '--on-accent': on });
+  const DARK = N('#0e0e0f', '#151516', '#1e1e20', '#262628', '#38383b', '#ececec', '#a3a3a8', '#6f6f75');
+  const LIGHT = N('#ffffff', '#f6f6f7', '#ededef', '#e3e3e6', '#cfcfd4', '#18181a', '#55555c', '#8a8a91');
+  const PALETTES = {
+    graphite: { name: 'Graphite', dark: { ...DARK, ...A('#f2f2f2', '#2a2a2d', '#f2f2f2', '#111112') }, light: { ...LIGHT, ...A('#18181a', '#ececef', '#18181a', '#ffffff') } },
+    tidewater: { name: 'Tidewater', dark: { ...N('#101214', '#16191c', '#1f2328', '#262b31', '#363c44', '#e3e6ea', '#a1a9b3', '#6d7580'), ...A('#5fcdbd', '#10302e', null, '#06201d') }, light: { ...LIGHT, ...A('#0b7a72', '#e2f3f0', null, '#ffffff') } },
+    harbor: { name: 'Harbor', dark: { ...N('#0c1117', '#111821', '#18212c', '#1f2a36', '#2e3b4a', '#e2e8f0', '#94a3b8', '#64748b'), ...A('#4cc2ff', '#0f2a3d', null, '#04192a') }, light: { ...LIGHT, ...A('#0969da', '#e6f1fb', null, '#ffffff') } },
+    lagoon: { name: 'Lagoon', dark: { ...N('#0d1311', '#121a17', '#18231f', '#22302b', '#30413a', '#e2ece7', '#93a69d', '#64776e'), ...A('#3ddc97', '#0f2e22', null, '#04201a') }, light: { ...LIGHT, ...A('#0f8a5f', '#e2f5ec', null, '#ffffff') } },
+    aegean: { name: 'Aegean', dark: { ...N('#0b1222', '#0f1830', '#15203b', '#1e2a47', '#2b3a5c', '#e6ecf7', '#9aa7c2', '#66749a'), ...A('#6ea8ff', '#13254a', '#e9c46a', '#071533') }, light: { ...LIGHT, ...A('#2457d6', '#e3eaf9', '#b8862b', '#ffffff') } },
+    fjord: { name: 'Fjord', dark: { ...N('#0e1518', '#131c20', '#192529', '#24323a', '#33444d', '#e4edf0', '#94a7ad', '#64777d'), ...A('#9ad1ff', '#17303f', null, '#0b2230') }, light: { ...LIGHT, ...A('#2f6f9f', '#e5f0f8', null, '#ffffff') } },
+    iris: { name: 'Iris', dark: { ...N('#111018', '#17161f', '#1f1e29', '#2a2836', '#3a3849', '#e8e6f2', '#a29fb6', '#716e86'), ...A('#9aa5ff', '#22264a', null, '#12163a') }, light: { ...LIGHT, ...A('#5b5bd6', '#ecebfd', null, '#ffffff') } },
+    ember: { name: 'Ember', dark: { ...N('#121011', '#191617', '#221e1f', '#2c2526', '#3d3435', '#ece6e3', '#a89e9a', '#7a706c'), ...A('#ff8a4c', '#3a2016', null, '#2a1206') }, light: { ...LIGHT, ...A('#c2410c', '#fdeee6', null, '#ffffff') } },
+    saffron: { name: 'Saffron', dark: { ...N('#0f141a', '#141b23', '#1b242e', '#243040', '#334256', '#e5e9ef', '#97a2b0', '#687384'), ...A('#f4b942', '#33290f', null, '#2a1d02') }, light: { ...LIGHT, ...A('#a16207', '#fbf1d9', null, '#ffffff') } },
+    moss: { name: 'Moss and copper', dark: { ...N('#11140f', '#171b14', '#1f241b', '#2a3125', '#3a4333', '#e7ebe1', '#a0a896', '#727a68'), ...A('#d98e4a', '#36261a', null, '#2a1606') }, light: { ...LIGHT, ...A('#a35a1c', '#f6ece2', null, '#ffffff') } },
+    rose: { name: 'Ink and rose', dark: { ...N('#121014', '#19161b', '#221e25', '#2d2830', '#3e3842', '#efe8ee', '#aa9fa8', '#7b717a'), ...A('#f07fa6', '#3a1d2a', null, '#2e0a19') }, light: { ...LIGHT, ...A('#be3a6b', '#fbe8ef', null, '#ffffff') } },
+    paper: { name: 'Paper', dark: { ...N('#1a1917', '#201f1c', '#292723', '#2f2d29', '#403d37', '#ede9e1', '#a9a59b', '#77736a'), ...A('#8fb0ff', '#1f2a44', null, '#0d1630') }, light: { ...N('#fbfaf7', '#f3f1ec', '#ebe8e1', '#e2ded5', '#cfc9bd', '#1d1d1f', '#5f5e5a', '#8b897f'), ...A('#2457d6', '#e3eaf9', null, '#ffffff') } },
+    monokai: {
+      name: 'Monokai',
+      dark: {
+        ...N('#272822', '#2d2e27', '#3e3d32', '#3b3c35', '#49483e', '#f8f8f2', '#cfcfc2', '#8f8b77'), ...A('#66d9ef', '#3e3d32', '#f92672', '#1b1c17'),
+        '--add': '#2f3a22', '--add-ln': '#384628', '--del': '#422432', '--del-ln': '#512a3b',
+        '--sx-keyword': '#f92672', '--sx-title': '#a6e22e', '--sx-string': '#e6db74', '--sx-number': '#ae81ff', '--sx-comment': '#75715e', '--sx-builtin': '#66d9ef', '--sx-tag': '#f92672', '--sx-meta': '#fd971f',
+      },
+      light: {
+        ...N('#fafaf8', '#f2f2ee', '#e8e8e2', '#e0e0d8', '#cbcbc0', '#272822', '#5c5c52', '#8e8a76'), ...A('#0a8fa8', '#e3f4f7', '#d0175a', '#ffffff'),
+        '--sx-keyword': '#d0175a', '--sx-title': '#5d8a00', '--sx-string': '#9a7d00', '--sx-number': '#7b4fd6', '--sx-comment': '#8e8a76', '--sx-builtin': '#0a8fa8', '--sx-tag': '#d0175a', '--sx-meta': '#c26b00',
+      },
+    },
+  };
+  const ALL_KEYS = [...new Set(Object.values(PALETTES).flatMap((p) => [...Object.keys(p.dark), ...Object.keys(p.light)]))];
+  const isDark = () => { const t = document.documentElement.dataset.theme; return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; };
+
+  // Applies the palette for the current mode as custom properties on <html>, and remembers the result so the
+  // inline script in index.html can paint it before anything else loads (no flash of the wrong colours).
+  function applyPalette() {
+    const root = document.documentElement, p = PALETTES[store.get('palette', 'graphite')] || PALETTES.graphite, vars = isDark() ? p.dark : p.light;
+    ALL_KEYS.forEach((k) => root.style.removeProperty(k));
+    Object.entries(vars).forEach(([k, v]) => root.style.setProperty(k, v));
+    store.set('vars', vars);
+  }
+
+  function appearanceMenu() {
+    const mode = document.documentElement.dataset.theme || 'system', cur = store.get('palette', 'graphite');
+    $('#appearance-pop').innerHTML = `<p class="menu-h">Mode</p>
+      <span class="seg-btns">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([k, l]) => `<button type="button" data-mode="${k}" class="${mode === k ? 'on' : ''}" aria-pressed="${mode === k}">${l}</button>`).join('')}</span>
+      <p class="menu-h">Palette</p>
+      <div class="palettes" role="radiogroup" aria-label="Palette">${Object.entries(PALETTES).map(([k, p]) => {
+        const v = isDark() ? p.dark : p.light;
+        return `<button type="button" role="radio" aria-checked="${k === cur}" data-palette="${k}" class="${k === cur ? 'on' : ''}"><span class="pal-sw" style="background:${v['--bg']};border-color:${v['--line-2']}"><i style="background:${v['--blue']}"></i>${v['--brand'] !== v['--blue'] ? `<i style="background:${v['--brand']}"></i>` : ''}</span>${p.name}${k === 'graphite' ? ' <span class="muted">· default</span>' : ''}</button>`;
+      }).join('')}</div>`;
+  }
+
+  $('#appearance').addEventListener('toggle', (e) => { if (e.target.open) appearanceMenu(); });
+  $('#appearance-pop').addEventListener('click', (e) => {
+    const m = e.target.closest('[data-mode]'), pal = e.target.closest('[data-palette]');
+    if (m) {
+      if (m.dataset.mode === 'system') { delete document.documentElement.dataset.theme; store.set('theme', null); }
+      else { document.documentElement.dataset.theme = m.dataset.mode; store.set('theme', m.dataset.mode); }
+    }
+    if (pal) store.set('palette', pal.dataset.palette);
+    if (m || pal) { applyPalette(); appearanceMenu(); }
   });
+  // Close the open menus when clicking elsewhere.
+  document.addEventListener('click', (e) => $$('details.menu[open]').forEach((dm) => { if (!e.composedPath().includes(dm)) dm.removeAttribute('open'); }));
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyPalette);
+  applyPalette();
 
   setInterval(() => $$('.elapsed[data-since]').forEach((el) => (el.textContent = clock(Date.now() - +el.dataset.since))), 1000);
 

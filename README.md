@@ -17,7 +17,9 @@ Open a PR and Odyssey shows it in three panes: the list of stops, the explanatio
 
 The home page shows reads in progress, your tours (each with its map, gist and how many stops you've marked understood), and your open PRs and review requests with size, review state, a 1–5 effort score (from size, no AI) and whether a tour is ready.
 
-Keys: `j`/`k` move between stops, `x` marks the current stop understood, `/` opens another PR, ← → and space drive the walkthrough on the overview. Each stop has its own URL (`#/owner/repo/123/2`).
+**Appearance** (the ◐ button): System, Light or Dark, and 13 palettes: Graphite (the default), Tidewater, Harbor, Lagoon, Aegean, Fjord, Iris, Ember, Saffron, Moss and copper, Ink and rose, Paper and Monokai (which also brings Sublime's syntax colours). Each palette has a light and a dark form; diffs keep GitHub's green and red in all of them. The choice is kept in your browser and applied before the page paints.
+
+The bare address (`http://localhost:4400`) is the landing page; your tours and PRs are at `#/`, and the logo takes you there. Keys: `j`/`k` move between stops, `x` marks the current stop understood, `/` opens another PR, ← → and space drive the walkthrough on the overview. Each stop has its own URL (`#/owner/repo/123/2`).
 
 ## Two ways to run it
 
