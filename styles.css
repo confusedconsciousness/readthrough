@@ -369,6 +369,8 @@ marker path { fill: var(--line-2); }
   .tour { display: flex; gap: 4px; overflow-x: auto; padding: 6px 8px; border-right: 0; border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
   .tour .group, .tour .row .t, .tour .row .c { display: none; }
   .tour .row { flex: none; white-space: nowrap; }
+  .tour .depth { flex: none; align-self: center; margin: 0 4px 0 0; grid-template-columns: repeat(3, auto); }
+  .tour .depth button { padding: 0 10px; }
   .tour .row .n { display: inline; font-variant-numeric: tabular-nums; }
   .note { border-right: 0; padding: 20px 16px 8px; overflow: visible; }
   .code { padding: 16px; overflow: visible; }
@@ -751,6 +753,7 @@ body[data-view="landing"] .account .signin { border-color: var(--line-2); }
 
 .tour .row .c { display: inline-flex; align-items: center; gap: 4px; }
 .tour .row .c .ic { width: 14px; height: 14px; }
+@media (max-width: 860px) { .tour .row .c { display: none; } } /* the strip shows stop numbers only */
 
 .goal { margin: -4px 0 14px; font-size: 13.5px; color: var(--fg-2); }
 .goal b { color: var(--fg); }

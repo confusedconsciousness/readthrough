@@ -2,7 +2,7 @@
 // Postgres when DATABASE_URL is set; otherwise SQLite in a single file (node:sqlite, built into Node).
 // The queries are written once for both: times are ISO-8601 text made in JS, JSON is stored as text,
 // and nothing Postgres-only (DISTINCT ON, = ANY, make_interval) is used.
-// Secrets (GitHub tokens, AI keys) are sealed with AES-256-GCM under READTHROUGH_SECRET before they reach a row.
+// Secrets (GitHub tokens) are sealed with AES-256-GCM under READTHROUGH_SECRET before they reach a row.
 const crypto = require('node:crypto');
 
 let kind, pool, lite, KEY;
@@ -37,9 +37,10 @@ create table if not exists ai_settings (
   provider text not null,
   model text not null default '',
   base_url text,
-  keys jsonb not null default '{}',
   updated_at timestamptz not null default now()
 );
+-- AI keys used to be stored here; they now stay in each person's browser.
+alter table ai_settings drop column if exists keys;
 create table if not exists tours (
   owner text not null,
   repo text not null,
@@ -90,7 +91,6 @@ create table if not exists ai_settings (
   provider text not null,
   model text not null default '',
   base_url text,
-  keys text not null default '{}',
   updated_at text not null
 );
 create table if not exists tours (
@@ -133,6 +133,8 @@ async function init({ url, file, secret }) {
     lite = new DatabaseSync(file);
     lite.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma busy_timeout = 5000;');
     lite.exec(LITE_SCHEMA);
+    // AI keys used to be stored here; they now stay in each person's browser.
+    if (lite.prepare("select 1 from pragma_table_info('ai_settings') where name = 'keys'").get()) lite.exec('alter table ai_settings drop column keys');
     kind = 'sqlite';
   }
   return kind;
@@ -197,20 +199,13 @@ const pruneSessions = () => q('delete from sessions where expires_at < $1', [now
 // ---------- AI settings ----------
 
 async function getAI(userId) {
-  const [r] = await q('select * from ai_settings where user_id = $1', [userId]);
-  if (!r) return null;
-  const keys = Object.fromEntries(Object.entries(json(r.keys) || {}).map(([p, v]) => [p, unseal(v)]));
-  return { provider: r.provider, model: r.model, baseURL: r.base_url, keys };
+  const [r] = await q('select provider, model, base_url from ai_settings where user_id = $1', [userId]);
+  return r ? { provider: r.provider, model: r.model, baseURL: r.base_url } : null;
 }
-async function setAI(userId, { provider, model, baseURL, key, clearKey }) {
-  const cur = (await getAI(userId)) || { keys: {} };
-  const keys = { ...cur.keys };
-  if (key) keys[provider] = key;
-  if (clearKey) delete keys[provider];
-  const sealed = Object.fromEntries(Object.entries(keys).filter(([, v]) => v).map(([p, v]) => [p, seal(v)]));
-  await q(`insert into ai_settings (user_id, provider, model, base_url, keys, updated_at) values ($1, $2, $3, $4, $5, $6)
-    on conflict (user_id) do update set provider = $2, model = $3, base_url = $4, keys = $5, updated_at = $6`,
-  [userId, provider, model || '', baseURL || null, JSON.stringify(sealed), now()]);
+async function setAI(userId, { provider, model, baseURL }) {
+  await q(`insert into ai_settings (user_id, provider, model, base_url, updated_at) values ($1, $2, $3, $4, $5)
+    on conflict (user_id) do update set provider = $2, model = $3, base_url = $4, updated_at = $5`,
+  [userId, provider, model || '', baseURL || null, now()]);
 }
 
 // ---------- tours ----------

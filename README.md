@@ -42,7 +42,7 @@ The bare address (`http://localhost:4400`) is the landing page; your tours and P
 
 Subscription logins only work locally. Anthropic doesn't allow Claude Pro/Max logins in third-party hosted apps, so a hosted Readthrough uses API keys. OpenAI's "Sign in with ChatGPT" can spend a ChatGPT plan from a hosted app, but only for apps OpenAI has approved through its partner form; Readthrough doesn't use it yet.
 
-Keys are encrypted (AES-256-GCM under `READTHROUGH_SECRET`) before they reach the database and are never sent back to the browser.
+API keys are never stored on the server. Each person's key stays in their browser (localStorage) and is sent over HTTPS, in the body of the request that starts a read, never in a URL. The server holds it in memory only while that read runs. Signing out clears it from the browser, and people enter it again on each new device.
 
 ## Run locally
 
@@ -92,12 +92,14 @@ docker run -p 4400:4400 --env-file .env -v readthrough-data:/data readthrough
 
 Put it behind HTTPS (your load balancer or reverse proxy) at `PUBLIC_URL`. Cookies are marked `Secure` and HSTS is sent when `PUBLIC_URL` starts with `https://`.
 
+When `PUBLIC_URL` is on an `app.` subdomain (`https://app.readthrough.xyz`), point the bare domain at the same server too. It then shows only the landing page, its sign-in links go to the app, and `www.` redirects to it. The session cookie stays on the app host.
+
 **Or deploy free on Render, with Neon for Postgres.** `render.yaml` describes the whole service:
 
 1. On [Neon](https://neon.com), create a project and copy its connection string.
-2. Create the GitHub App (step 1) with the callback `https://readthrough.xyz/auth/callback`.
+2. Create the GitHub App (step 1) with the callback `https://app.readthrough.xyz/auth/callback`.
 3. On [Render](https://render.com): New → Blueprint, pick this repository. Render reads `render.yaml`, generates `READTHROUGH_SECRET`, and asks for `DATABASE_URL` and the three GitHub App values.
-4. In the service's Custom Domains, Render shows the DNS records for `readthrough.xyz` and `www`; add them at your registrar. HTTPS is issued automatically.
+4. In the service's Custom Domains, Render shows the DNS records for `readthrough.xyz`, `www` and `app`; add them at your registrar. HTTPS is issued automatically.
 
 Render's free plan sleeps after 15 minutes without traffic, and the next visit takes about a minute to wake it; a paid instance removes that. Reads are unaffected by proxy timeouts: the page follows a read over a Server-Sent Events stream with a heartbeat, and a dropped stream reconnects to the same read.
 
@@ -107,7 +109,8 @@ Render's free plan sleeps after 15 minutes without traffic, and the next visit t
 
 - GitHub access is read-only and per person; GitHub decides what each person can see.
 - Sessions are random 256-bit cookies (HttpOnly, SameSite=Lax); the database stores only their SHA-256.
-- GitHub tokens and AI keys are encrypted at rest. Rotating `READTHROUGH_SECRET` signs everyone out and forgets saved keys.
+- GitHub tokens are encrypted at rest (AES-256-GCM under `READTHROUGH_SECRET`); rotating it signs everyone out.
+- AI keys aren't stored on the server at all: they stay in each person's browser and reach the server only with a read.
 - The API refuses cross-site requests; pages are served with a strict Content-Security-Policy and `frame-ancestors 'none'`.
 - The PR's diff, description, commits and linked issues are sent to the AI each person chooses, with their key.
 

@@ -9,15 +9,16 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /
     autoDeploy: true
-    domains:
+    domains: # the app on app.; the bare domain is the landing page, and www redirects to it
+      - app.readthrough.xyz
       - readthrough.xyz
       - www.readthrough.xyz
     envVars:
       - key: PUBLIC_URL
-        value: https://readthrough.xyz
+        value: https://app.readthrough.xyz
       - key: DATABASE_URL
         sync: false
-      - key: READTHROUGH_SECRET # seals GitHub tokens and AI keys at rest; changing it signs everyone out
+      - key: READTHROUGH_SECRET # seals GitHub tokens at rest; changing it signs everyone out
         generateValue: true
       - key: GITHUB_CLIENT_ID
         sync: false

@@ -32,14 +32,9 @@ async function check(label, opts) {
   assert.equal(await db.sessionUser(sid), null);
   await db.pruneSessions();
 
-  await db.setAI(u.id, { provider: 'anthropic', model: 'claude-sonnet-5-5', key: 'sk-ant-1' });
+  await db.setAI(u.id, { provider: 'anthropic', model: 'claude-sonnet-5-5' });
   await db.setAI(u.id, { provider: 'openai', model: 'gpt-x', baseURL: 'https://api.example.com/v1', key: 'sk-oa-1' });
-  let ai = await db.getAI(u.id);
-  assert.deepEqual(ai.keys, { anthropic: 'sk-ant-1', openai: 'sk-oa-1' });
-  assert.equal(ai.provider, 'openai');
-  await db.setAI(u.id, { provider: 'openai', model: 'gpt-x', clearKey: true });
-  ai = await db.getAI(u.id);
-  assert.deepEqual(ai.keys, { anthropic: 'sk-ant-1' });
+  assert.deepEqual(await db.getAI(u.id), { provider: 'openai', model: 'gpt-x', baseURL: 'https://api.example.com/v1' }); // a key passed in is never stored
 
   const ref = { owner: 'o', repo: `r${gid}`, num: 7 };
   await db.putTour(ref, 'sha1', 'claude-sonnet', { gist: 'one', stops: [], anchors: { f0h0: ['a.js', '+x'] }, meta: { at: '2026-01-01T00:00:00.000Z', title: 'Fix 100% of the push_outbox bugs' } }, u.id);

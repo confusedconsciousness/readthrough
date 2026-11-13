@@ -14,6 +14,7 @@
   const store = {
     get: (k, d) => { try { return JSON.parse(localStorage.getItem('readthrough:' + k)) ?? d; } catch { return d; } },
     set: (k, v) => { try { localStorage.setItem('readthrough:' + k, JSON.stringify(v)); } catch {} },
+    del: (k) => { try { localStorage.removeItem('readthrough:' + k); } catch {} },
   };
   const doneKey = () => `done:${cur.key}@${cur.story.meta.sha}`;
   const done = () => new Set(cur?.story ? store.get(doneKey(), []) : []);
@@ -31,15 +32,30 @@
   });
   // A read over Server-Sent Events: each step arrives as it happens and the tour as the last event. The read runs on the
   // server either way; after a dropped connection this reconnects (never with fresh, so it can't start a second read)
-  // and the server joins it to the same read. Three drops in a row give up with LOST.
+  // and the server joins it to the same read. Three drops in a row give up with LOST. It's a POST (so not EventSource)
+  // because it carries this browser's AI key, which the server uses for the read and never stores.
   const readStream = (key, fresh, onStep) => new Promise((resolve, reject) => {
     let misses = 0;
-    const connect = (again) => {
-      const es = new EventSource(`/api/story/stream?pr=${key}${fresh && !again ? '&fresh' : ''}`);
-      es.addEventListener('progress', (e) => { misses = 0; onStep(JSON.parse(e.data)); });
-      es.addEventListener('done', (e) => { es.close(); resolve(JSON.parse(e.data)); });
-      es.addEventListener('failed', (e) => { es.close(); reject(new Error(JSON.parse(e.data).error)); });
-      es.onerror = () => { es.close(); if (++misses >= 3) reject(new Error(LOST)); else setTimeout(() => connect(true), 2000 * misses); };
+    const connect = async (again) => {
+      try {
+        const provider = (await cfgP?.catch(() => null))?.provider;
+        const r = await fetch('/api/story/stream', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pr: key, fresh: !!fresh && !again, key: store.get(`key:${provider}`, '') }) });
+        if (!r.ok) return reject(new Error((await r.json().catch(() => ({}))).error || r.statusText));
+        const rd = r.body.pipeThrough(new TextDecoderStream()).getReader();
+        for (let buf = '', i; ;) {
+          const { value, done } = await rd.read();
+          if (done) break;
+          buf += value;
+          while ((i = buf.indexOf('\n\n')) >= 0) {
+            const block = buf.slice(0, i), name = /^event: (.*)$/m.exec(block)?.[1], data = /^data: (.*)$/m.exec(block)?.[1];
+            buf = buf.slice(i + 2);
+            if (name === 'progress') { misses = 0; onStep(JSON.parse(data)); }
+            if (name === 'done') return resolve(JSON.parse(data));
+            if (name === 'failed') return reject(new Error(JSON.parse(data).error));
+          }
+        }
+      } catch {}
+      if (++misses >= 3) reject(new Error(LOST)); else setTimeout(() => connect(true), 2000 * misses);
     };
     connect(false);
   });
@@ -95,7 +111,10 @@
 
   function route() {
     // The bare address is the front door: the landing page. The app itself lives under #/ (your tours) and #/owner/repo/n.
-    if (!me?.user || ['', '#', '#/about'].includes(location.hash)) return landing();
+    // With split hosts (me.site), the bare domain is only the landing page and app.… is only the app.
+    const onApp = me?.site && location.origin === me.app;
+    if (me?.site && !onApp && location.hash.startsWith('#/') && location.hash !== '#/about') return location.replace(me.app + '/' + location.hash);
+    if (!me?.user || location.hash === '#/about' || (!onApp && ['', '#'].includes(location.hash))) return landing();
     const h = parse();
     document.body.dataset.view = h ? 'pr' : 'home';
     if (!h) return home();
@@ -883,7 +902,9 @@
   // ---------- settings: who reads the PR ----------
 
   const dlg = $('#settings'), form = $('#settings-form');
-  let cfg = null;
+  let cfg = null, cfgP = null; // cfgP: the settings, once loaded (a read waits for it to know which key to send)
+  // API keys stay in this browser (localStorage, per provider) and go to the server only with a read.
+  const keyOf = (id) => store.get(`key:${id}`, '');
   const pretty = (m) => String(m || '').replace(/^claude-([a-z]+)-(\d+)-(\d+)$/, (_, a, b, c) => `${a[0].toUpperCase()}${a.slice(1)} ${b}.${c}`);
   const reader = () => (cfg ? pretty(cfg.model) || { codex: 'Codex', openai: 'the API', claude: 'Claude Code', anthropic: 'Claude' }[cfg.provider] : 'Claude');
   const DESC = {
@@ -906,8 +927,8 @@
         ${p.models
           ? `<label>Model <select name="model-${p.id}">${p.models.map((m) => `<option value="${m}"${c.provider === p.id && c.model === m ? ' selected' : ''}>${pretty(m)}${MODEL_NOTE[m] ? ` · ${MODEL_NOTE[m]}` : ''}</option>`).join('')}</select></label>`
           : `<label>Model <input name="model-${p.id}" value="${c.provider === p.id ? esc(c.model) : ''}" placeholder="${p.id === 'codex' ? 'Blank uses your Codex default' : 'The model id your provider lists'}" spellcheck="false"></label>`}
-        ${p.key ? `<label>API key <input name="key-${p.id}" type="password" autocomplete="off" spellcheck="false" placeholder="${c.saved.includes(p.id) ? 'Saved. Leave blank to keep it.' : 'Paste your key'}"></label>
-          <p class="small muted">Encrypted before it's stored, and never sent back to your browser.${c.saved.includes(p.id) ? ` <button type="button" class="link" data-clearkey="${p.id}">Remove saved key</button>` : ''}</p>` : ''}
+        ${p.key ? `<label>API key <input name="key-${p.id}" type="password" autocomplete="off" spellcheck="false" placeholder="${keyOf(p.id) ? 'Saved in this browser. Leave blank to keep it.' : c.envKey?.includes(p.id) ? 'Using the key in this machine\'s environment' : 'Paste your key'}"></label>
+          <p class="small muted">Kept only in this browser. It's sent over HTTPS with each read and used for that read alone; Readthrough never stores it.${keyOf(p.id) ? ` <button type="button" class="link" data-clearkey="${p.id}">Forget this key</button>` : ''}</p>` : ''}
       </div>`).join('')}
       <p class="small muted">Tours you already have stay as they are. New PRs are read with this choice; use Re-read on a PR to read it again with it.</p>
       <p class="err" id="settings-err" role="alert"></p>
@@ -917,7 +938,7 @@
   const syncFields = () => $$('.fields', form).forEach((d) => { d.hidden = d.dataset.for !== form.elements.provider.value; });
 
   async function openSettings() {
-    cfg = await api('/api/settings');
+    cfg = await (cfgP = api('/api/settings'));
     form.innerHTML = settingsForm(cfg);
     syncFields();
     if (!dlg.open) dlg.showModal();
@@ -933,9 +954,14 @@
   form.addEventListener('change', (e) => { if (e.target.name === 'provider') syncFields(); });
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const f = form.elements, provider = f.provider.value;
+    const f = form.elements, provider = f.provider.value, key = (f[`key-${provider}`]?.value || '').trim();
+    const p = cfg.providers.find((x) => x.id === provider);
     try {
-      cfg = await postSettings({ provider, model: f[`model-${provider}`]?.value, key: f[`key-${provider}`]?.value || '', baseURL: f['baseURL-openai']?.value });
+      if (p?.key && !key && !keyOf(provider) && !cfg.envKey?.includes(provider)) throw new Error(`Paste your ${p.label} key.`);
+      if (key.length > 500) throw new Error('That key is too long.');
+      cfg = await postSettings({ provider, model: f[`model-${provider}`]?.value, baseURL: f['baseURL-openai']?.value });
+      cfgP = Promise.resolve(cfg);
+      if (key) store.set(`key:${provider}`, key);
       dlg.close();
       if (cur && !cur.demo) { open(cur.key, cur.sel); if (cur.story) bar(); }
     } catch (err) {
@@ -946,9 +972,8 @@
     if (e.target.closest('[data-close]') || e.target === dlg) return dlg.close();
     const clear = e.target.closest('[data-clearkey]');
     if (!clear) return;
-    const id = clear.dataset.clearkey;
-    try { await postSettings({ provider: id, model: form.elements[`model-${id}`]?.value, clearKey: true }); await openSettings(); }
-    catch (err) { $('#settings-err').textContent = err.message; }
+    store.del(`key:${clear.dataset.clearkey}`);
+    openSettings().catch((err) => { $('#settings-err').textContent = err.message; });
   });
   $('#gear').addEventListener('click', () => openSettings().catch((e) => alert(e.message)));
 
@@ -974,6 +999,7 @@
 
   async function signOut() {
     await fetch('/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {});
+    (cfg?.providers || []).forEach((p) => store.del(`key:${p.id}`)); // keys leave with the person
     location.href = '/';
   }
 
@@ -1028,6 +1054,7 @@
   }
 
   async function landing() {
+    if (me?.site && !me.user && location.origin === me.app) return location.replace(me.site); // signed out on the app host
     cur = null;
     crumb.innerHTML = '';
     status.innerHTML = '';
@@ -1326,7 +1353,7 @@
   addEventListener('hashchange', route);
   api('/api/me').then((m) => { me = m; }, () => { me = { mode: 'local', user: null }; }).then(() => {
     account();
-    if (me.user) api('/api/settings').then((c) => { cfg = c; }, () => {});
+    if (me.user) (cfgP = api('/api/settings')).then((c) => { cfg = c; }, () => {});
     route();
   });
 

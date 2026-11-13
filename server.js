@@ -17,6 +17,11 @@ const MODE = process.env.GITHUB_CLIENT_ID ? 'hosted' : 'local';
 const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
 const HOST = process.env.HOST || (MODE === 'hosted' ? '0.0.0.0' : '127.0.0.1');
 const SECURE = PUBLIC_URL.startsWith('https://');
+// A PUBLIC_URL on app.example.com splits the hosts: the app (and its session cookie) lives there, and the bare
+// example.com shows only the landing page. Any other PUBLIC_URL serves both from one address.
+const APP_HOST = new URL(PUBLIC_URL).host;
+const SITE_URL = APP_HOST.startsWith('app.') ? PUBLIC_URL.replace('//app.', '//') : null;
+const HOSTS = SITE_URL ? { app: PUBLIC_URL, site: SITE_URL } : {};
 const ALLOWED = (process.env.READTHROUGH_ALLOWED_ORGS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const APP_SLUG = process.env.GITHUB_APP_SLUG || '';
 
@@ -202,17 +207,18 @@ async function loadPR(ctx, ref) {
 const available = () => Object.entries(ai.PROVIDERS).filter(([, p]) => p.hosted || MODE === 'local').map(([id, p]) => ({ id, ...p }));
 const DEFAULT_AI = MODE === 'local' ? { provider: 'claude', model: 'claude-sonnet-5-5' } : { provider: 'anthropic', model: 'claude-sonnet-5-5' };
 
-async function aiConfig(user) {
-  const s = (await db.getAI(user.id)) || { ...DEFAULT_AI, keys: {} };
-  let key = s.keys[s.provider];
-  // Locally a key in the environment works too; a hosted server never lends its own key to users.
-  if (!key && MODE === 'local') key = { anthropic: process.env.ANTHROPIC_API_KEY, openai: process.env.OPENAI_API_KEY }[s.provider];
-  return { provider: s.provider, model: s.model, baseURL: s.baseURL, key, saved: Object.keys(s.keys) };
+// API keys are never stored: each person's browser keeps theirs and sends it with every read, and it lives in this
+// process only while that read runs. Locally a key in the environment works too; a hosted server never lends its own.
+const ENV_KEYS = MODE === 'local' ? { anthropic: process.env.ANTHROPIC_API_KEY, openai: process.env.OPENAI_API_KEY } : {};
+async function aiConfig(user, key) {
+  const s = (await db.getAI(user.id)) || DEFAULT_AI;
+  return { provider: s.provider, model: s.model, baseURL: s.baseURL, key: key || ENV_KEYS[s.provider] };
 }
 
 async function publicSettings(user) {
   const c = await aiConfig(user);
-  return { provider: c.provider, model: c.model, baseURL: c.baseURL || 'https://api.openai.com/v1', hasKey: !!c.key, saved: c.saved, providers: available(), installed: ai.installed, mode: MODE };
+  const envKey = Object.keys(ENV_KEYS).filter((p) => ENV_KEYS[p]);
+  return { provider: c.provider, model: c.model, baseURL: c.baseURL || 'https://api.openai.com/v1', envKey, providers: available(), installed: ai.installed, mode: MODE };
 }
 
 // Trust boundary: everything the settings form sends is checked here.
@@ -233,11 +239,7 @@ async function saveSettings(user, b) {
     if (!u || !['https:', 'http:'].includes(u.protocol)) throw new Error('Base URL must start with https://');
     if (MODE === 'hosted' && u.protocol !== 'https:') throw new Error('Base URL must use https:// on a hosted Readthrough.');
   }
-  const key = typeof b.key === 'string' ? b.key.trim() : '';
-  if (key.length > 500) throw new Error('That key is too long.');
-  const cur = await aiConfig(user);
-  if (p.key && !key && !cur.saved.includes(b.provider) && !(MODE === 'local' && cur.provider === b.provider && cur.key)) throw new Error(`Paste your ${p.label} key.`);
-  await db.setAI(user.id, { provider: b.provider, model, baseURL, key, clearKey: !!b.clearKey });
+  await db.setAI(user.id, { provider: b.provider, model, baseURL });
   return publicSettings(user);
 }
 
@@ -342,9 +344,9 @@ function carry(old, pr) {
 const nice = (m) => String(m || '').replace(/^claude-([a-z]+)-(\d+)-(\d+)$/, (_, a, b, c) => `${a[0].toUpperCase()}${a.slice(1)} ${b}.${c}`) || 'the model';
 const watch = (entry, onStep) => { if (!onStep) return entry.job; entry.listeners.add(onStep); if (entry.step) onStep(entry.step); return entry.job; };
 
-async function story(ctx, ref, fresh, onStep) {
+async function story(ctx, ref, fresh, onStep, aiKey) {
   const pr = await loadPR(ctx, ref); // also the access check: GitHub refuses PRs this user can't see
-  const cfg = await aiConfig(ctx.user), reader = readerOf(cfg), key = `${refKey(ref)}@${pr.sha}#${reader}`;
+  const cfg = await aiConfig(ctx.user, aiKey), reader = readerOf(cfg), key = `${refKey(ref)}@${pr.sha}#${reader}`;
   await db.markOpened(ctx.user.id, ref);
   if (!fresh) {
     // The chosen model is already reading this commit (a re-read, say): wait for it rather than show the older tour it replaces.
@@ -496,7 +498,7 @@ function send(res, code, body, type = 'application/json; charset=utf-8', headers
   res.writeHead(code, { ...BASE_HEADERS, 'content-type': type, ...(type.startsWith('text/html') && { 'content-security-policy': CSP }), ...headers });
   res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
 }
-const redirect = (res, to, cookies = []) => { res.writeHead(302, { ...BASE_HEADERS, location: to, 'set-cookie': cookies }); res.end(); };
+const redirect = (res, to, cookies = [], code = 302) => { res.writeHead(code, { ...BASE_HEADERS, location: to, 'set-cookie': cookies }); res.end(); };
 
 function cookies(req) {
   return Object.fromEntries((req.headers.cookie || '').split(';').map((p) => p.trim()).filter(Boolean).map((p) => {
@@ -572,6 +574,10 @@ async function joinWaitlist(req, res) {
 
 async function handle(req, res) {
   const u = new URL(req.url, PUBLIC_URL);
+  if (SITE_URL && req.headers.host !== APP_HOST) {
+    if (req.headers.host === `www.${new URL(SITE_URL).host}`) return redirect(res, SITE_URL + req.url, [], 301);
+    if (u.pathname === '/auth/login') return redirect(res, `${PUBLIC_URL}/auth/login`); // sessions live on the app host
+  }
   // Only this page may call the API: another site could otherwise start reads or change your settings.
   const site = req.headers['sec-fetch-site'];
   if ((u.pathname.startsWith('/api/') || req.method !== 'GET') && site && !['same-origin', 'none'].includes(site)) return send(res, 403, { error: 'Cross-site request refused' });
@@ -601,10 +607,10 @@ async function handle(req, res) {
   let ctx;
   try { ctx = await context(req); } catch (e) { if (e.status !== 401) throw e; }
   if (u.pathname === '/api/me') {
-    if (!ctx) return send(res, 200, { mode: MODE, user: null, waitlist: WAITLIST });
+    if (!ctx) return send(res, 200, { mode: MODE, user: null, waitlist: WAITLIST, ...HOSTS });
     let installs = null;
     if (MODE === 'hosted') installs = (await gh(ctx.token, 'user/installations').catch(() => ({ total_count: null }))).total_count;
-    return send(res, 200, { mode: MODE, user: ctx.user, installs, installURL: APP_SLUG ? `https://github.com/apps/${APP_SLUG}/installations/new` : null, waitlist: WAITLIST });
+    return send(res, 200, { mode: MODE, user: ctx.user, installs, installURL: APP_SLUG ? `https://github.com/apps/${APP_SLUG}/installations/new` : null, waitlist: WAITLIST, ...HOSTS });
   }
   if (!ctx) return send(res, 401, { error: 'Sign in with GitHub first.' });
 
@@ -614,15 +620,19 @@ async function handle(req, res) {
     if (!String(req.headers['content-type']).startsWith('application/json')) return send(res, 415, { error: 'Expected JSON' });
     try { return send(res, 200, await saveSettings(ctx.user, await body(req))); } catch (e) { return send(res, 400, { error: e.message }); }
   }
-  if (req.method !== 'GET') return send(res, 405, { error: 'GET only' });
-  if (u.pathname === '/api/inbox') return send(res, 200, await inbox(ctx));
-  if (u.pathname === '/api/recent') return send(res, 200, await recent(ctx, u.searchParams));
   // A read as a Server-Sent Events stream: it starts the read (or joins one already running), reports each step, sends
   // a comment every 15 seconds so proxies keep the connection open, and ends with the tour. The read itself runs on the
   // server regardless, so a dropped stream loses nothing: the browser reconnects and joins the same read.
+  // It's a POST so the person's AI key travels in the body, never in a URL that could reach a log.
   if (u.pathname === '/api/story/stream') {
-    const ref = parseRef(u.searchParams.get('pr'));
+    if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+    if (!String(req.headers['content-type']).startsWith('application/json')) return send(res, 415, { error: 'Expected JSON' });
+    let b;
+    try { b = await body(req); } catch (e) { return send(res, 400, { error: e.message }); }
+    const ref = parseRef(String(b.pr || ''));
     if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
+    const aiKey = typeof b.key === 'string' ? b.key.trim() : '';
+    if (aiKey.length > 500) return send(res, 400, { error: 'That key is too long.' });
     res.writeHead(200, { ...BASE_HEADERS, 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
     const ev = (name, data) => { if (!res.writableEnded) res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`); };
     const beat = setInterval(() => { if (!res.writableEnded) res.write(': still reading\n\n'); }, 15_000);
@@ -630,7 +640,7 @@ async function handle(req, res) {
     res.write('retry: 3000\n\n');
     ev('progress', 'Fetching the pull request');
     try {
-      const { anchors, ...s } = await story(ctx, ref, u.searchParams.has('fresh'), (t) => ev('progress', t)); // anchors stay on the server
+      const { anchors, ...s } = await story(ctx, ref, b.fresh === true, (t) => ev('progress', t), aiKey); // anchors stay on the server
       ev('done', s);
     } catch (e) {
       ev('failed', { error: e.message });
@@ -640,10 +650,12 @@ async function handle(req, res) {
     }
     return;
   }
-  if (u.pathname === '/api/pr' || u.pathname === '/api/story') {
+  if (req.method !== 'GET') return send(res, 405, { error: 'GET only' });
+  if (u.pathname === '/api/inbox') return send(res, 200, await inbox(ctx));
+  if (u.pathname === '/api/recent') return send(res, 200, await recent(ctx, u.searchParams));
+  if (u.pathname === '/api/pr') {
     const ref = parseRef(u.searchParams.get('pr'));
     if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
-    if (u.pathname === '/api/story') { const { anchors, ...s } = await story(ctx, ref, u.searchParams.has('fresh')); return send(res, 200, s); } // anchors stay on the server
     const pr = await loadPR(ctx, ref);
     pr.reading = readingOf(ref, pr.sha)?.since || null; // so a page that comes back mid-read shows the real elapsed time
     pr.toured = (await db.toured([pr.sha])).has(`${ref.owner}/${ref.repo}/${ref.num}@${pr.sha}`); // so the page can say it is opening a saved tour, not reading
