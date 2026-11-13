@@ -24,8 +24,8 @@ services:
         sync: false
       - key: GITHUB_CLIENT_SECRET
         sync: false
-      - key: GITHUB_APP_SLUG
-        sync: false
+      - key: GITHUB_APP_SLUG # github.com/apps/readthrough; the "Choose repositories" link goes there
+        value: readthrough
       - key: READTHROUGH_ALLOWED_ORGS # optional: comma-separated GitHub organizations allowed to sign in
         sync: false
       - key: READTHROUGH_ALLOWED_USERS # comma-separated GitHub logins allowed to sign in; with the waitlist on, nobody else can

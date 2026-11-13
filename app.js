@@ -283,7 +283,9 @@
     const next = q || page ? null : tours.find((t) => { const p = progOf(t); return p.d < p.n && t.state !== 'merged' && t.state !== 'closed'; }) || tours[0];
     const rest = next ? tours.filter((t) => t !== next) : tours;
     const p = next && progOf(next);
-    box.innerHTML = `${next ? `<a class="resume" href="#/${esc(next.key)}">
+    // Signed in, but the GitHub App is installed nowhere: nothing can be read until someone picks repositories.
+    const install = me?.mode === 'hosted' && me.installs === 0 ? `<a class="h-install" href="${esc(installURL())}" target="_blank" rel="noopener"><span><b>Readthrough can't see any repositories yet</b><span class="muted">Choose which ones it may read. Access is read-only, and you can change it any time.</span></span><span class="btn primary">Choose repositories</span></a>` : '';
+    box.innerHTML = `${install}${next ? `<a class="resume" href="#/${esc(next.key)}">
         <div class="resume-copy"><p class="sub">Continue reading · ${keyLabel(next.key)} ${stateChip(next.state)}</p><h2>${esc(next.title || next.key)}</h2><p class="gist">${prose(next.gist)}</p>
           <div class="resume-foot">${pbar(p)}<span>${progText(p)}</span>${recChip(next.rec)}<span class="btn primary">Resume tour</span></div></div>
         <div class="resume-map">${thumbOf(next)}</div></a>` : ''}
@@ -990,12 +992,20 @@
         <a href="#/" data-menu>Your pull requests</a>
         <a href="#/about" data-menu>About Readthrough</a>
         <button type="button" data-settings data-menu>AI settings</button>
+        ${me.mode === 'hosted' ? `<a href="${esc(installURL())}" target="_blank" rel="noopener">Choose repositories</a>` : ''}
         ${me.mode === 'hosted'
           ? '<button type="button" data-signout>Sign out</button>'
           : '<p class="menu-note">Local mode has no Readthrough sign-in. To use another GitHub account, run <code>gh auth logout</code> and <code>gh auth login</code>, then reload.</p>'}
       </div>
     </details>`;
   }
+
+  // The app's install page (pick repositories), or GitHub's list of installed apps when the slug isn't configured.
+  const installURL = () => me?.installURL || 'https://github.com/settings/installations';
+  // Back from installing the app in another tab: ask again, so the home page notices the new repositories.
+  addEventListener('focus', () => {
+    if (me?.user && me.installs === 0 && $('#home2')) api('/api/me').then((m) => { me = m; if (m.installs) home(); }, () => {});
+  });
 
   async function signOut() {
     await fetch('/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {});

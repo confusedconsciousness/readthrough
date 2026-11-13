@@ -899,6 +899,13 @@ body[data-view="landing"] .account .signin { border-color: var(--line-2); }
 .t-list.compact .t-thumb { height: 60px; }
 .t-list.compact .gist { display: none; }
 
+.h-install { display: flex; align-items: center; gap: 20px; padding: 20px 24px; margin-bottom: 32px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-2); color: var(--fg); }
+.h-install:hover { text-decoration: none; border-color: var(--line-2); }
+.h-install b { display: block; margin-bottom: 4px; font: 700 17px/1.3 var(--display); letter-spacing: -0.01em; }
+.h-install > span:first-child { flex: 1; min-width: 0; }
+.h-install .muted { font-size: 13.5px; }
+.h-install .btn { flex: none; margin-left: auto; }
+@media (max-width: 560px) { .h-install { flex-direction: column; align-items: flex-start; } .h-install .btn { margin-left: 0; } }
 .resume { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 32px; align-items: center; padding: 28px; margin-bottom: 40px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-2); color: var(--fg); }
 .resume:hover { text-decoration: none; border-color: var(--line-2); }
 .resume .sub { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 12.5px; color: var(--fg-2); }
