@@ -595,10 +595,11 @@ async function handle(req, res) {
   // Binary files: the display typeface, self-hosted (SIL OFL, see fonts/OFL.txt) so pages make no outside font
   // requests, and the link-preview image that chat apps and search engines show.
   const FILES = { '/fonts/schibsted-600.woff2': 'font/woff2', '/fonts/schibsted-700.woff2': 'font/woff2', '/og.png': 'image/png' };
-  if (req.method === 'GET' && FILES[u.pathname]) {
+  const read = req.method === 'GET' || req.method === 'HEAD'; // link crawlers often check with HEAD first; Node sends no body for it
+  if (read && FILES[u.pathname]) {
     return send(res, 200, fs.readFileSync(path.join(__dirname, u.pathname)), FILES[u.pathname], { 'cache-control': 'public, max-age=86400' });
   }
-  if (req.method === 'GET' && STATIC[u.pathname]) {
+  if (read && STATIC[u.pathname]) {
     const f = STATIC[u.pathname];
     let text = fs.readFileSync(path.join(__dirname, f), 'utf8');
     if (f === 'index.html') text = text.replaceAll('%SITE%', SITE_URL || PUBLIC_URL); // link previews need absolute URLs

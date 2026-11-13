@@ -5,7 +5,7 @@ WORKDIR /app
 ENV NODE_ENV=production READTHROUGH_SQLITE=/data/readthrough.db
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && mkdir -p /data && chown node:node /data
-COPY server.js db.js github.js ai.js index.html app.js styles.css demo.json ./
+COPY server.js db.js github.js ai.js index.html app.js styles.css demo.json og.png ./
 COPY fonts ./fonts
 USER node
 VOLUME /data
