@@ -141,10 +141,34 @@ async function sinceLast(ctx, ref, pr) {
   }
 }
 
+// Line comments from the PR's reviews, as threads (a comment and its replies), each pinned to the row of our diff it
+// was written on: by file, then the new line number (or the old one for comments on removed lines). A thread whose
+// line is no longer in the diff has hunk '' and is shown as outdated.
+function threadsOf(comments, files) {
+  const at = new Map(), out = [];
+  for (const c of [...comments].sort((a, b) => a.created_at.localeCompare(b.created_at))) {
+    const item = { author: c.user?.login || 'ghost', avatar: c.user?.avatar_url || '', body: String(c.body || '').slice(0, 4000), at: c.created_at, url: c.html_url };
+    const parent = c.in_reply_to_id && at.get(c.in_reply_to_id);
+    if (parent) { parent.items.push(item); at.set(c.id, parent); continue; }
+    const t = { path: c.path, side: c.side === 'LEFT' ? 'LEFT' : 'RIGHT', line: c.line ?? null, hunk: '', row: 0, items: [item] };
+    const f = files.find((x) => x.path === c.path);
+    if (f && t.line != null) {
+      for (const h of f.hunks) {
+        const r = h.lines.findIndex(([s, o, n]) => (t.side === 'LEFT' ? s !== '+' && o === t.line : s !== '-' && n === t.line));
+        if (r >= 0) { t.hunk = h.id; t.row = r; break; }
+      }
+    }
+    at.set(c.id, t);
+    out.push(t);
+  }
+  return out;
+}
+
 async function loadPR(ctx, ref) {
   const base = `repos/${ref.owner}/${ref.repo}/pulls/${ref.num}`;
-  const [pr, files, commits, issues] = await Promise.all([
+  const [pr, files, commits, issues, comments] = await Promise.all([
     gh(ctx.token, base), gh(ctx.token, `${base}/files?per_page=100`, { all: true }), gh(ctx.token, `${base}/commits?per_page=100`, { all: true }), linkedIssues(ctx, ref),
+    gh(ctx.token, `${base}/comments?per_page=100`, { all: true }).catch(() => []), // ponytail: comments are a bonus; a failed fetch shows none
   ]);
   const fs_ = files.map((x, i) => fileOf(x, i, 'f'));
   const pick = (re) => fs_.filter((f) => re.test(f.path)).map((f) => f.path);
@@ -167,7 +191,7 @@ async function loadPR(ctx, ref) {
     base: pr.base.ref, head: pr.head.ref, sha: pr.head.sha,
     add: pr.additions, del: pr.deletions,
     commits: commits.map((c) => c.commit.message.split('\n')[0]),
-    files: fs_, signals, issues,
+    files: fs_, signals, issues, comments: threadsOf(comments, fs_),
   };
   out.since = await sinceLast(ctx, ref, out);
   return out;
@@ -249,6 +273,13 @@ function tidy(s, pr) {
     st.points.forEach(pin);
     st.hunks = [...new Set([...st.hunks, ...st.points.map((pt) => pt.hunk)])].filter((id) => known.has(id));
   }
+  s.premortem?.failures.forEach(pin);
+  if (s.chapters?.length) {
+    const seen = new Set();
+    s.chapters = s.chapters.map((c) => ({ ...c, stops: c.stops.filter((i) => Number.isInteger(i) && i >= 0 && i < s.stops.length && !seen.has(i) && seen.add(i)).sort((a, b) => a - b) })).filter((c) => c.stops.length);
+    const left = s.stops.map((_, i) => i).filter((i) => !seen.has(i));
+    if (left.length) s.chapters.push({ title: 'Other changes', summary: '', stops: left });
+  }
   // The reviewer's findings are pinned like points; a blocker always means "request changes", whatever the model said.
   if (s.review) {
     s.review.findings.forEach(pin);
@@ -296,6 +327,8 @@ function carry(old, pr) {
     return st.hunks.length > 0;
   });
   tour.flow.nodes.forEach((n) => { n.stop = n.stop >= 0 ? idx[n.stop] ?? -1 : -1; });
+  tour.chapters = (tour.chapters || []).map((c) => ({ ...c, stops: c.stops.map((i) => idx[i] ?? -1).filter((i) => i >= 0) })).filter((c) => c.stops.length);
+  tour.premortem?.failures.forEach((f) => { if (f.hunk) move(f); });
   tour.scenarios?.forEach((sc) => sc.steps.forEach((st) => { if (st.hunk) move(st, 'start', 'end'); }));
   tour.intent?.items.forEach((it) => { it.hunk = (it.hunk && hunk(it.hunk)) || ''; });
   const open = [];
@@ -305,19 +338,25 @@ function carry(old, pr) {
   return { tour, open, uncovered };
 }
 
-async function story(ctx, ref, fresh) {
+// Readers watching a read: each in-flight entry keeps its current step and who to tell when it changes.
+const nice = (m) => String(m || '').replace(/^claude-([a-z]+)-(\d+)-(\d+)$/, (_, a, b, c) => `${a[0].toUpperCase()}${a.slice(1)} ${b}.${c}`) || 'the model';
+const watch = (entry, onStep) => { if (!onStep) return entry.job; entry.listeners.add(onStep); if (entry.step) onStep(entry.step); return entry.job; };
+
+async function story(ctx, ref, fresh, onStep) {
   const pr = await loadPR(ctx, ref); // also the access check: GitHub refuses PRs this user can't see
   const cfg = await aiConfig(ctx.user), reader = readerOf(cfg), key = `${refKey(ref)}@${pr.sha}#${reader}`;
   await db.markOpened(ctx.user.id, ref);
   if (!fresh) {
     // The chosen model is already reading this commit (a re-read, say): wait for it rather than show the older tour it replaces.
-    if (inflight.has(key)) return inflight.get(key).job;
+    if (inflight.has(key)) return watch(inflight.get(key), onStep);
     const hit = await db.getTour(ref, pr.sha, reader);
     if (hit) return hit;
     const busy = readingOf(ref, pr.sha); // already being read, perhaps by another reader: wait for that
-    if (busy) return busy.job;
+    if (busy) return watch(busy, onStep);
   }
-  if (inflight.has(key)) return inflight.get(key).job;
+  if (inflight.has(key)) return watch(inflight.get(key), onStep);
+  const entry = { since: Date.now(), key: refKey(ref), title: pr.title, model: cfg.model || cfg.provider, by: ctx.user.id, step: '', listeners: new Set() };
+  const step = (t) => { entry.step = t; entry.listeners.forEach((f) => f(t)); };
   const job = (async () => {
     const t0 = Date.now(), local = MODE === 'local';
     // New commits on a toured PR: carry the old tour forward and read only what's new. Re-read (fresh) reads it all.
@@ -325,25 +364,31 @@ async function story(ctx, ref, fresh) {
     let s, model, from = null;
     if (prev?.data.anchors && prev.data.review) { // older tours lack anchors or a review: read those in full once
       const { tour, open, uncovered } = carry(prev.data, pr);
+      step(`Reading the new commits with ${nice(cfg.model || cfg.provider)}`);
       const u = await ai.update(pr, tour, open, uncovered, cfg, { local });
       ({ model } = u);
       s = tour;
       s.since = u.s.since;
+      const first = s.stops.length;
       s.stops.push(...u.s.stops);
+      if (s.chapters?.length && u.s.stops.length) s.chapters.push({ title: 'Added since the last tour', summary: u.s.since.summary, stops: u.s.stops.map((_, k) => first + k) });
       s.review.findings = [...u.s.findings, ...open.filter((_, i) => u.s.kept.includes(i + 1)), ...s.review.findings];
       Object.assign(s.review, u.s.review);
       from = prev.sha;
     } else {
+      step(`Reading ${pr.files.length} ${pr.files.length === 1 ? 'file' : 'files'} with ${nice(cfg.model || cfg.provider)}`);
       ({ s, model } = await ai.analyse(pr, cfg, { local }));
     }
+    step('Pinning the tour to the code');
     tidy(s, pr);
     s.anchors = anchorsOf(pr);
     s.meta = { sha: pr.sha, provider: cfg.provider, model, ms: Date.now() - t0, at: new Date().toISOString(), ref: pr.ref, title: pr.title, state: pr.state, from };
     await db.putTour(ref, pr.sha, reader, s, ctx.user.id);
     return s;
   })().finally(() => inflight.delete(key));
-  inflight.set(key, { job, since: Date.now(), key: refKey(ref), title: pr.title, model: cfg.model || cfg.provider, by: ctx.user.id });
-  return job;
+  entry.job = job;
+  inflight.set(key, entry);
+  return watch(entry, onStep);
 }
 
 // Home page: this user's reads in progress, and the latest tour of each PR they've opened.
@@ -494,6 +539,37 @@ async function signIn(req, res, u) {
   }
 }
 
+// ---------- waitlist ----------
+
+// READTHROUGH_WAITLIST=1 puts a waitlist form on the landing page in place of sign-in. Anyone may join; nothing else
+// about the API opens up. Read the list with: select email, note, created_at from waitlist order by created_at;
+const WAITLIST = /^(1|true|yes)$/i.test(process.env.READTHROUGH_WAITLIST || '');
+const EMAIL = /^[^\s@<>"]{1,64}@[^\s@<>".]+(\.[^\s@<>".]+)+$/;
+// ponytail: per-process memory, keyed by the address the platform's proxy saw (the last X-Forwarded-For entry);
+// fine for one instance, move it into Postgres if you run several.
+const tries = new Map();
+function limited(req) {
+  const ip = String(req.headers['x-forwarded-for'] || '').split(',').pop().trim() || req.socket.remoteAddress || '?';
+  const now = Date.now(), recent = (tries.get(ip) || []).filter((t) => now - t < 10 * 60_000);
+  recent.push(now);
+  tries.set(ip, recent);
+  if (tries.size > 10_000) tries.clear();
+  return recent.length > 5;
+}
+
+// Trust boundary: the one write anyone can make without signing in.
+async function joinWaitlist(req, res) {
+  if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+  if (!String(req.headers['content-type']).startsWith('application/json')) return send(res, 415, { error: 'Expected JSON' });
+  if (limited(req)) return send(res, 429, { error: 'Too many tries from here. Wait a few minutes.' });
+  let b;
+  try { b = await body(req); } catch (e) { return send(res, 400, { error: e.message }); }
+  const email = String(b.email || '').trim().toLowerCase();
+  if (email.length > 254 || !EMAIL.test(email)) return send(res, 400, { error: "That doesn't look like an email address." });
+  await db.joinWaitlist(email, String(b.note || '').trim().slice(0, 300));
+  return send(res, 200, { ok: true }); // the same answer for new and existing addresses, so the list can't be probed
+}
+
 async function handle(req, res) {
   const u = new URL(req.url, PUBLIC_URL);
   // Only this page may call the API: another site could otherwise start reads or change your settings.
@@ -521,13 +597,14 @@ async function handle(req, res) {
   }
 
   if (!u.pathname.startsWith('/api/')) return send(res, 404, page('Not found', 'There is nothing at this address.'), TYPES.html);
+  if (u.pathname === '/api/waitlist') return joinWaitlist(req, res);
   let ctx;
   try { ctx = await context(req); } catch (e) { if (e.status !== 401) throw e; }
   if (u.pathname === '/api/me') {
-    if (!ctx) return send(res, 200, { mode: MODE, user: null });
+    if (!ctx) return send(res, 200, { mode: MODE, user: null, waitlist: WAITLIST });
     let installs = null;
     if (MODE === 'hosted') installs = (await gh(ctx.token, 'user/installations').catch(() => ({ total_count: null }))).total_count;
-    return send(res, 200, { mode: MODE, user: ctx.user, installs, installURL: APP_SLUG ? `https://github.com/apps/${APP_SLUG}/installations/new` : null });
+    return send(res, 200, { mode: MODE, user: ctx.user, installs, installURL: APP_SLUG ? `https://github.com/apps/${APP_SLUG}/installations/new` : null, waitlist: WAITLIST });
   }
   if (!ctx) return send(res, 401, { error: 'Sign in with GitHub first.' });
 
@@ -540,12 +617,36 @@ async function handle(req, res) {
   if (req.method !== 'GET') return send(res, 405, { error: 'GET only' });
   if (u.pathname === '/api/inbox') return send(res, 200, await inbox(ctx));
   if (u.pathname === '/api/recent') return send(res, 200, await recent(ctx, u.searchParams));
+  // A read as a Server-Sent Events stream: it starts the read (or joins one already running), reports each step, sends
+  // a comment every 15 seconds so proxies keep the connection open, and ends with the tour. The read itself runs on the
+  // server regardless, so a dropped stream loses nothing: the browser reconnects and joins the same read.
+  if (u.pathname === '/api/story/stream') {
+    const ref = parseRef(u.searchParams.get('pr'));
+    if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
+    res.writeHead(200, { ...BASE_HEADERS, 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
+    const ev = (name, data) => { if (!res.writableEnded) res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`); };
+    const beat = setInterval(() => { if (!res.writableEnded) res.write(': still reading\n\n'); }, 15_000);
+    req.on('close', () => clearInterval(beat));
+    res.write('retry: 3000\n\n');
+    ev('progress', 'Fetching the pull request');
+    try {
+      const { anchors, ...s } = await story(ctx, ref, u.searchParams.has('fresh'), (t) => ev('progress', t)); // anchors stay on the server
+      ev('done', s);
+    } catch (e) {
+      ev('failed', { error: e.message });
+    } finally {
+      clearInterval(beat);
+      res.end();
+    }
+    return;
+  }
   if (u.pathname === '/api/pr' || u.pathname === '/api/story') {
     const ref = parseRef(u.searchParams.get('pr'));
     if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
     if (u.pathname === '/api/story') { const { anchors, ...s } = await story(ctx, ref, u.searchParams.has('fresh')); return send(res, 200, s); } // anchors stay on the server
     const pr = await loadPR(ctx, ref);
     pr.reading = readingOf(ref, pr.sha)?.since || null; // so a page that comes back mid-read shows the real elapsed time
+    pr.toured = (await db.toured([pr.sha])).has(`${ref.owner}/${ref.repo}/${ref.num}@${pr.sha}`); // so the page can say it is opening a saved tour, not reading
     return send(res, 200, pr);
   }
   send(res, 404, { error: 'not found' });
@@ -589,3 +690,12 @@ console.assert(TEST.test('src/foo.test.ts') && TEST.test('tests/a.py') && !TEST.
   console.assert(tour.flow.nodes[0].stop === -1 && tour.flow.nodes[1].stop === 0 && open.length === 1, 'carry drops');
   console.assert(uncovered.length === 1 && uncovered[0].hunks.map((h) => h.id).join() === 'f0h0', 'carry uncovered');
 }
+{
+  // review comments: replies join their thread; a comment on a removed line pins by its old number; a moved-away line is outdated
+  const files = [{ path: 'a.js', hunks: [{ id: 'f0h0', lines: [[' ', 4, 4, 'x'], ['-', 5, null, 'old'], ['+', null, 5, 'new']] }] }];
+  const c = (id, extra) => ({ id, created_at: `2026-01-0${id}T00:00:00Z`, user: { login: 'u' }, body: 'b', path: 'a.js', side: 'RIGHT', ...extra });
+  const t = threadsOf([c(1, { line: 5 }), c(2, { in_reply_to_id: 1 }), c(3, { line: 5, side: 'LEFT' }), c(4, { line: null })], files);
+  console.assert(t.length === 3 && t[0].row === 2 && t[0].items.length === 2, 'threads: reply joins, new line pins');
+  console.assert(t[1].row === 1 && t[1].side === 'LEFT' && t[2].hunk === '', 'threads: old line pins, outdated stays');
+}
+console.assert(EMAIL.test('a.b+c@example.co.uk') && !EMAIL.test('a@b') && !EMAIL.test('a b@c.com') && !EMAIL.test('<x>@y.com') && !EMAIL.test('a@b..com'), 'waitlist email check');

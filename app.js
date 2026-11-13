@@ -29,6 +29,22 @@
     if (!r.ok) throw new Error(j.error || r.statusText);
     return j;
   });
+  // A read over Server-Sent Events: each step arrives as it happens and the tour as the last event. The read runs on the
+  // server either way; after a dropped connection this reconnects (never with fresh, so it can't start a second read)
+  // and the server joins it to the same read. Three drops in a row give up with LOST.
+  const readStream = (key, fresh, onStep) => new Promise((resolve, reject) => {
+    let misses = 0;
+    const connect = (again) => {
+      const es = new EventSource(`/api/story/stream?pr=${key}${fresh && !again ? '&fresh' : ''}`);
+      es.addEventListener('progress', (e) => { misses = 0; onStep(JSON.parse(e.data)); });
+      es.addEventListener('done', (e) => { es.close(); resolve(JSON.parse(e.data)); });
+      es.addEventListener('failed', (e) => { es.close(); reject(new Error(JSON.parse(e.data).error)); });
+      es.onerror = () => { es.close(); if (++misses >= 3) reject(new Error(LOST)); else setTimeout(() => connect(true), 2000 * misses); };
+    };
+    connect(false);
+  });
+  // A new step: the status bar and the sidebar line say it straight away.
+  const stepUI = () => { bar(); const t = $('.tour .tm-step'); if (t && cur?.step) t.textContent = cur.step; };
   const clock = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
   const ago = (iso) => {
     const m = (Date.now() - Date.parse(iso)) / 60000;
@@ -110,10 +126,10 @@
   function open(key, sel = 'overview', fresh) {
     let m = memo.get(key);
     if (!m || fresh) memo.set(key, (m = { t0: Date.now() }));
-    const c = cur = { key, pr: m.pr || null, story: m.story || null, err: null, serr: null, t0: m.t0, sel };
+    const c = cur = { key, pr: m.pr || null, story: m.story || null, err: null, serr: null, t0: m.t0, sel, step: m.step || '' };
     render();
     m.prP ||= api(`/api/pr?pr=${key}`).then((pr) => { m.pr = pr; if (pr.reading && !m.story) m.t0 = pr.reading; return pr; });
-    m.storyP ||= api(`/api/story?pr=${key}${fresh ? '&fresh' : ''}`).then((st) => (m.story = st));
+    m.storyP ||= readStream(key, fresh, (t) => { m.step = t; if (c === cur) { c.step = t; stepUI(); } }).then((st) => (m.story = st));
     m.prP.then((pr) => { if (c === cur) { c.pr = pr; c.t0 = m.t0; render(); } }, (e) => { m.prP = null; if (c === cur) { c.err = e.message; render(); } });
     m.storyP.then((st) => { if (c === cur) { c.story = st; render(); } else if (!cur) refreshRecent(); }, (e) => { m.storyP = null; if (c === cur) { c.serr = e.message; render(); } });
   }
@@ -276,17 +292,35 @@
     show();
   }
 
+  // How far in to go. Glance: the verdict and the top risks. Review: walk the stops. Deep: every point, step and finding.
+  // Each level shows less rather than the same thing smaller, so the explanation never outweighs the change.
+  const DEPTHS = [['glance', 'Glance', 'The verdict and the top risks'], ['review', 'Review', 'Walk the stops'], ['deep', 'Deep', 'Every point, step and finding']];
+  const depth = () => store.get('depth', 'review');
+  const SEV_RANK = { blocker: 0, major: 1, minor: 2, nit: 3 };
+  const bySeverity = (fs) => [...fs].sort((a, b) => SEV_RANK[a.severity] - SEV_RANK[b.severity]);
+  const stopOfHunk = (s) => { const m = new Map(); s.stops.forEach((st, i) => st.hunks.forEach((h) => !m.has(h) && m.set(h, i))); return m; };
+  const chapterVerdict = (fs) => (fs.some((f) => f.severity === 'blocker' || f.severity === 'major') ? ['Problems', 'alert', 'bad'] : fs.some((f) => f.severity === 'minor') ? ['Concerns', 'half', 'warn'] : ['Sound', 'check', 'ok']);
+  const LIKELY = { likely: 'Likely', possible: 'Possible', unlikely: 'Unlikely' };
+  const AREA = { load: 'Load', retries: 'Retries and timeouts', queues: 'Queues', concurrency: 'Concurrency', partial_failure: 'Partial failure', data_growth: 'Data growth', security: 'Security', cost: 'Cost', compatibility: 'Compatibility' };
+  const findingItem = (f) => `<li${f.hunk ? ` data-pt="${f.k}" tabindex="0"` : ''}><span class="pn">${f.k}</span><span class="pt-t"><span class="f-tags"><span class="sev ${f.severity}">${SEV[f.severity]?.[0] || ''}</span><span class="f-dim">${DIM_NAME[f.dimension] || ''}</span></span>${prose(f.text)}${f.suggestion ? `<span class="pt-fix">${prose(f.suggestion)}</span>` : ''}</span>${f.hunk ? `<span class="pt-at">${esc(loc(f.hunk, f.from))}</span>` : ''}</li>`;
+  const failureItem = (f) => `<li${f.hunk ? ` data-pt="${f.k}" tabindex="0"` : ''}><span class="pn">${f.k}</span><span class="pt-t"><span class="f-tags"><span class="sev ${f.likelihood === 'likely' ? 'major' : 'minor'}">${LIKELY[f.likelihood] || ''}</span><span class="f-dim">${AREA[f.area] || ''}</span></span><b class="pm-t">${esc(f.title)}</b>
+      <span class="pm-row"><span>When</span>${prose(f.trigger)}</span><span class="pm-row"><span>Then</span>${prose(f.impact)}</span><span class="pm-row"><span>Because</span>${prose(f.cause)}</span>${f.fix ? `<span class="pt-fix">${prose(f.fix)}</span>` : ''}</span>${f.hunk ? `<span class="pt-at">${esc(loc(f.hunk, f.from))}</span>` : ''}</li>`;
+  const depthBar = () => `<div class="depth" role="group" aria-label="How deep to go">${DEPTHS.map(([k, l, t]) => `<button type="button" data-depth="${k}" class="${depth() === k ? 'on' : ''}" aria-pressed="${depth() === k}" title="${t}">${l}</button>`).join('')}</div>`;
+
   function tour() {
     const { pr, story: s, serr } = cur;
     const sinceRow = hasSince(pr) ? `<a class="row" data-sel="since">Since last tour<span class="c new">${pr.since.rewritten ? 'rebased' : `${pr.since.commits.length} new`}</span></a>` : '';
     if (!s) return `${sinceRow}<a class="row" data-sel="overview">Overview</a>
       ${serr ? `<p class="tour-msg bad">The tour couldn't be written.<br><button class="link" data-fresh>Try again</button></p>`
-        : `<p class="tour-msg">Reading ${plural(pr.files.length, 'file')} · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></p><div class="bar-indef"></div>`}`;
+        : `<p class="tour-msg"><span class="tm-step">${cur.step ? esc(cur.step) : pr.toured && !pr.reading ? 'Opening the saved tour' : `Reading ${plural(pr.files.length, 'file')}`}</span> · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></p><div class="bar-indef"></div>`}`;
     const d = done(), ix = index(pr), u = unread(pr, s);
     const size = (st) => st.hunks.reduce((n, id) => n + (ix.get(id)?.h.add || 0) + (ix.get(id)?.h.del || 0), 0);
-    return `${sinceRow}<a class="row" data-sel="overview">Overview</a>
-      <p class="group">Stops</p>
-      ${s.stops.map((st, i) => `<a class="row stop${d.has(i) ? ' done' : ''}" data-sel="${i}"><span class="mark" aria-hidden="true"></span><span class="n">${i + 1}</span><span class="t">${esc(st.title)}</span>${flagged(st) ? `<span class="c" title="${esc(NEED[st.necessity.verdict][0])}: ${esc(st.necessity.reason)}">${needIc(st.necessity.verdict)}</span>` : `<span class="c" title="lines changed">${size(st) || ''}</span>`}</a>`).join('')}
+    const stopRows = depth() === 'glance'
+      ? `<a class="row fold" data-depth="review">${plural(s.stops.length, 'stop')}<span class="c">Walk them in Review</span></a>`
+      : (s.chapters?.length ? s.chapters : [{ title: 'Stops', stops: s.stops.map((_, i) => i) }]).map((c, ci) => `${ci || s.chapters?.length ? `<p class="group chap-g">${esc(c.title)}</p>` : ''}${c.stops.map((i) => [s.stops[i], i]).map(([st, i]) => `<a class="row stop${d.has(i) ? ' done' : ''}" data-sel="${i}"><span class="mark" aria-hidden="true"></span><span class="n">${i + 1}</span><span class="t">${esc(st.title)}</span>${flagged(st) ? `<span class="c" title="${esc(NEED[st.necessity.verdict][0])}: ${esc(st.necessity.reason)}">${needIc(st.necessity.verdict)}</span>` : `<span class="c" title="lines changed">${size(st) || ''}</span>`}</a>`).join('')}`).join('');
+    return `${depthBar()}${sinceRow}<a class="row" data-sel="overview">Overview</a>
+      ${s.chapters?.length && depth() !== 'glance' ? '' : '<p class="group">Stops</p>'}
+      ${stopRows}
       <p class="group">Check</p>
       ${hasIntent(s) ? `<a class="row" data-sel="intent">Does it do what was asked?<span class="c">${ic(VERDICT_IC[s.intent.verdict] || 'dot', VERDICT[s.intent.verdict]?.[1] || '')}${VERDICT[s.intent.verdict]?.[2] || ''}</span></a>` : ''}
       ${u.hunks.length || u.files.length ? `<a class="row" data-sel="unread">Unexplained<span class="c warn">${u.hunks.length + u.files.length}</span></a>` : ''}
@@ -298,6 +332,7 @@
   function show() {
     if (!cur?.pr || !$('#note')) return;
     const { pr, story: s } = cur;
+    document.body.dataset.depth = depth();
     if (cur.sel === 'auto') cur.sel = hasSince(pr) ? 'since' : 'overview';
     // Until the tour arrives the overview stands in, but cur.sel keeps the deep link. The since view needs only the PR.
     let sel = cur.sel;
@@ -320,7 +355,8 @@
     if (cur.demo) return;
     const s = cur.story;
     if (!s) {
-      status.innerHTML = cur.serr ? `<span class="bad">The read failed. The reason is in the left-hand pane.</span>` : `<span>Reading with ${esc(reader())} · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></span>`;
+      const p = cur.pr, what = cur.step ? esc(cur.step) : !p ? 'Opening the pull request' : p.toured && !p.reading ? 'Opening the saved tour' : p.since && !p.since.rewritten ? `Reading the new commits with ${esc(reader())}` : `Reading with ${esc(reader())}`;
+      status.innerHTML = cur.serr ? `<span class="bad">The read failed. The reason is in the left-hand pane.</span>` : `<span>${what} · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></span>`;
       return;
     }
     const d = done(), n = s.stops.length, u = unread(cur.pr, s);
@@ -353,27 +389,39 @@
   const desc = (pr, openIt) => `<details class="desc"${openIt ? ' open' : ''}><summary>Author's description</summary><div>${pr.body.trim() ? esc(pr.body) : '<span class="muted">Empty.</span>'}</div></details>`;
 
   function pane(sel) {
-    const { pr, story: s } = cur, d = done(), u = unread(pr, s), n = s.stops.length;
+    const { pr, story: s } = cur, d = done(), u = unread(pr, s), n = s.stops.length, D = depth();
+    const risks = s.review ? bySeverity(s.review.findings.filter((f) => f.severity !== 'nit')).slice(0, 3) : [];
     if (sel === 'overview') return [
       `${heading(pr)}
        ${hasSince(pr) ? `<a class="banner" data-sel="since"><b>${pr.since.rewritten ? 'Rebased' : plural(pr.since.commits.length, 'new commit')}</b> since the last tour${pr.since.at ? `, ${ago(pr.since.at)} ago` : ''}<span>See what changed →</span></a>` : ''}
        <p class="lead">${prose(s.gist)}</p>
        ${s.goal ? `<p class="goal"><b>Goal.</b> ${prose(s.goal)}</p>` : ''}
+       ${s.story ? `<h2>How it fits together</h2><p class="story">${prose(s.story)}</p>` : ''}
        ${s.review ? `<a class="glance" data-sel="merge">
          <span class="glance-h">${recIc(s.review.recommendation)}<b>${REC[s.review.recommendation][0]}</b>${tally(s.review) ? `<span class="muted"> · ${tally(s.review)}</span>` : ''}<span class="glance-go">Open the review</span></span>
          <span class="glance-dims">${dimsOf(s.review).map((x) => `<span class="gd" title="${esc(x.name)}: ${esc(GRADE[x.grade]?.[0] || '')}. ${esc(x.summary)}">${meter(x.grade)}<span>${x.name}</span></span>`).join('')}</span>
        </a>` : ''}
        ${hasIntent(s) ? `<p class="asked"><a data-sel="intent">${ic(VERDICT_IC[s.intent.verdict] || 'dot', VERDICT[s.intent.verdict][1])}${VERDICT[s.intent.verdict][0]}</a> <span class="muted">· ${s.intent.items.filter((r) => r.status === 'met').length} of ${s.intent.items.length} requirements met, from ${s.intent.source === 'issue' ? 'the linked issue' : 'the description'}</span></p>` : ''}
-       <h2>Why</h2><p>${prose(s.why)}</p>
+       ${pr.comments?.length ? (() => { const old = pr.comments.filter((t) => !t.hunk); return `<p class="asked">${ic('discuss', 'muted')}<span>${plural(pr.comments.length, 'comment thread')} from reviewers, shown under their lines${old.length ? ` · ${old.length} on code that has changed since` : ''}</span></p>
+         ${old.length ? `<details class="desc"><summary>Comments on code that has changed (${old.length})</summary>${old.map((t) => `<p class="th-where"><code>${esc(t.path)}</code></p>${threadHTML(t)}`).join('')}</details>` : ''}`; })() : ''}
+       ${D === 'glance' && risks.length ? `<h2>Top risks</h2><ol class="risks">${risks.map((f) => `<li><span class="sev ${f.severity}">${SEV[f.severity][0]}</span><span>${prose(f.text)}</span></li>`).join('')}</ol>
+         <div class="actions"><button class="btn primary" data-depth="review">Walk the stops</button><button class="btn" data-sel="merge">Open the review</button></div>` : ''}
+       ${D === 'glance' ? '' : `<h2>Why</h2><p>${prose(s.why)}</p>
        ${s.changes.length ? `<h2>Behaviour</h2><table class="changes"><thead><tr><th>Before</th><th>After</th></tr></thead><tbody>${s.changes.map((c) => `<tr><td>${prose(c.before)}</td><td>${prose(c.after)}</td></tr>`).join('')}</tbody></table>` : ''}
        ${facts(pr)}${desc(pr)}
-       <div class="actions"><button class="btn primary" data-sel="0">Start the tour <kbd>j</kbd></button></div>`,
+       <div class="actions"><button class="btn primary" data-sel="0">Start the tour <kbd>j</kbd></button></div>`}`,
       `${s.flow.nodes.length ? flowBlock(s) : ''}
        <div class="block"><div class="block-head"><h2>Files</h2></div>${files(pr, s)}</div>`,
     ];
-    if (sel === 'merge' && s.review) {
-      const r = s.review, [recLabel, recTone] = REC[r.recommendation] || ['', ''];
-      const fs = numbered(r.findings);
+    if (sel === 'merge' && s.review && s.chapters?.length) {
+      const r = s.review, home = stopOfHunk(s), keep = (f) => D === 'deep' || f.severity !== 'nit';
+      const all = bySeverity(r.findings).filter(keep), ordered = [];
+      const chs = s.chapters.map((c) => { const fs = all.filter((f) => f.hunk && c.stops.includes(home.get(f.hunk))); ordered.push(...fs); return { c, fs }; });
+      const wide = all.filter((f) => !ordered.includes(f)); ordered.push(...wide);
+      const fs = numbered(ordered), num = new Map(ordered.map((f, i) => [f, i + 1]));
+      const fails = (s.premortem?.failures || []).filter((f) => D === 'deep' || f.likelihood !== 'unlikely').map((f, i) => ({ ...f, k: fs.length + i + 1 }));
+      const dims = dimsOf(r).filter((x) => D === 'deep' || x.grade !== 'good'), nits = r.findings.filter((f) => f.severity === 'nit').length;
+      const items = (list) => `<ol class="points findings">${list.map((f) => findingItem({ ...f, k: num.get(f) })).join('')}</ol>`;
       return [
         `<p class="kicker">Review</p>
          <h1 class="title">Readthrough's review</h1>
@@ -381,15 +429,49 @@
            <div class="rb-head">${recIc(r.recommendation)}<span><b>Readthrough</b> ${REC_SAYS[r.recommendation] || ''}</span>${tally(r) ? `<span class="rb-tally">${tally(r)}</span>` : ''}</div>
            <div class="rb-body"><p>${prose(r.summary)}</p></div>
          </div>
-         <h2>Scorecard</h2>
-         <table class="scorecard"><tbody>${dimsOf(r).map((x) => `<tr title="${esc(x.q)}"><th>${x.name}</th><td class="m">${meter(x.grade)}<span class="grade ${x.grade}">${GRADE[x.grade]?.[0] || ''}</span></td><td class="sum">${prose(x.summary)}${x.count ? ` <span class="muted">· ${plural(x.count, 'finding')}</span>` : ''}</td></tr>`).join('')}</tbody></table>
-         <p class="small muted">Graded from the diff, the description and linked issues, not the whole repository. Treat it as a second reviewer's notes, not a verdict.</p>
-         <h2>Findings</h2>
+         ${s.story ? `<h2>How it fits together</h2><p class="story">${prose(s.story)}</p>` : ''}
+         ${D === 'glance' ? `<h2>Top risks</h2>${risks.length ? `<ol class="risks">${risks.map((f) => `<li><span class="sev ${f.severity}">${SEV[f.severity][0]}</span><span>${prose(f.text)}</span></li>`).join('')}</ol>` : '<p class="muted">Nothing stood out.</p>'}
+           <div class="actions"><button class="btn primary" data-depth="review">See it chapter by chapter</button></div>` : `
+         <h2>Chapter by chapter</h2>
+         ${chs.map(({ c, fs: cf }, ci) => { const [v, icon, tone] = chapterVerdict(cf); return `<section class="chap">
+           <div class="chap-h"><span class="chap-n">${ci + 1}</span><b>${esc(c.title)}</b><span class="chap-v">${ic(icon, tone)}${v}</span><a class="chap-go" data-sel="${c.stops[0]}">${c.stops.length === 1 ? `Stop ${c.stops[0] + 1}` : `Stops ${c.stops[0] + 1}–${c.stops[c.stops.length - 1] + 1}`}</a></div>
+           ${c.summary ? `<p>${prose(c.summary)}</p>` : ''}
+           ${cf.length ? items(cf) : ''}</section>`; }).join('')}
+         ${wide.length ? `<section class="chap"><div class="chap-h"><span class="chap-n">·</span><b>Across the whole PR</b></div>${items(wide)}</section>` : ''}
+         ${D !== 'deep' && nits ? `<p class="more-depth"><button class="link" data-depth="deep">${plural(nits, 'nit')} in Deep</button></p>` : ''}
+         ${s.premortem?.failures?.length ? `<h2>Will it hold up?</h2>
+           <p class="small muted">Imagined three months after merging, at ten times today's traffic: the most plausible ways this causes an incident.</p>
+           <ol class="points findings premortem">${fails.map(failureItem).join('')}</ol>
+           ${s.premortem.unknowns?.length ? `<p class="unknowns"><b>What the diff can't show.</b> ${s.premortem.unknowns.map((x) => prose(x)).join(' ')}</p>` : ''}` : ''}
+         ${dims.length ? `<h2>Scorecard</h2>
+         <table class="scorecard"><tbody>${dims.map((x) => `<tr title="${esc(x.q)}"><th>${x.name}</th><td class="m">${meter(x.grade)}<span class="grade ${x.grade}">${GRADE[x.grade]?.[0] || ''}</span></td><td class="sum">${prose(x.summary)}</td></tr>`).join('')}</tbody></table>
+         <p class="small muted">Graded from the diff, the description and linked issues, not the whole repository. Treat it as a second reviewer's notes, not a verdict.</p>` : ''}
+         ${s.stops.some(flagged) ? `<h2>Possibly unnecessary</h2><ul class="unneeded">${s.stops.map((st, i) => (flagged(st) ? `<li>${needIc(st.necessity.verdict)}<a data-sel="${i}">${i + 1}. ${esc(st.title)}</a> <span class="need-w">${NEED[st.necessity.verdict][0]}</span><p>${prose(st.necessity.reason)}</p></li>` : '')).join('')}</ul>` : ''}
+         ${s.questions.length ? `<h2>Questions for the author</h2><ul class="questions">${s.questions.map((q) => `<li>${prose(q)}</li>`).join('')}</ul>` : ''}`}`,
+        codeFor(pr, [...(D === 'glance' ? [] : fs), ...(D === 'glance' ? [] : fails)], []) || '<p class="code-empty">No finding is tied to a specific line.</p>',
+      ];
+    }
+    if (sel === 'merge' && s.review) {
+      const r = s.review, [recLabel, recTone] = REC[r.recommendation] || ['', ''];
+      const all = bySeverity(r.findings), shown = D === 'deep' ? all : D === 'review' ? all.filter((f) => f.severity !== 'nit') : risks;
+      const fs = numbered(shown), hidden = all.length - shown.length, dims = dimsOf(r).filter((x) => D === 'deep' || x.grade !== 'good');
+      return [
+        `<p class="kicker">Review</p>
+         <h1 class="title">Readthrough's review</h1>
+         <div class="review-box">
+           <div class="rb-head">${recIc(r.recommendation)}<span><b>Readthrough</b> ${REC_SAYS[r.recommendation] || ''}</span>${tally(r) ? `<span class="rb-tally">${tally(r)}</span>` : ''}</div>
+           <div class="rb-body"><p>${prose(r.summary)}</p></div>
+         </div>
+         ${D === 'glance' || !dims.length ? '' : `<h2>Scorecard</h2>
+         <table class="scorecard"><tbody>${dims.map((x) => `<tr title="${esc(x.q)}"><th>${x.name}</th><td class="m">${meter(x.grade)}<span class="grade ${x.grade}">${GRADE[x.grade]?.[0] || ''}</span></td><td class="sum">${prose(x.summary)}${x.count ? ` <span class="muted">· ${plural(x.count, 'finding')}</span>` : ''}</td></tr>`).join('')}</tbody></table>
+         <p class="small muted">Graded from the diff, the description and linked issues, not the whole repository. Treat it as a second reviewer's notes, not a verdict.</p>`}
+         <h2>${D === 'glance' ? 'Top risks' : 'Findings'}</h2>
          ${fs.length ? `<ol class="points findings">${fs.map((f) => `<li${f.hunk ? ` data-pt="${f.k}" tabindex="0"` : ''}><span class="pn">${f.k}</span><span class="pt-t"><span class="f-tags"><span class="sev ${f.severity}">${SEV[f.severity]?.[0] || ''}</span><span class="f-dim">${DIM_NAME[f.dimension] || ''}</span></span>${prose(f.text)}${f.suggestion ? `<span class="pt-fix">${prose(f.suggestion)}</span>` : ''}</span>${f.hunk ? `<span class="pt-at">${esc(loc(f.hunk, f.from))}</span>` : ''}</li>`).join('')}</ol>`
            : '<p class="muted">No findings. Nothing in this diff stood out as wrong.</p>'}
-         ${s.stops.some(flagged) ? `<h2>Possibly unnecessary</h2><p class="small muted">Parts of the PR the goal may not need. Each reason is written so you can paste it into a review comment.</p>
+         ${hidden ? `<p class="more-depth"><button class="link" data-depth="deep">${plural(hidden, D === 'review' ? 'nit' : 'more finding')} in Deep</button></p>` : ''}
+         ${D !== 'glance' && s.stops.some(flagged) ? `<h2>Possibly unnecessary</h2><p class="small muted">Parts of the PR the goal may not need. Each reason is written so you can paste it into a review comment.</p>
            <ul class="unneeded">${s.stops.map((st, i) => (flagged(st) ? `<li>${needIc(st.necessity.verdict)}<a data-sel="${i}">${i + 1}. ${esc(st.title)}</a> <span class="need-w">${NEED[st.necessity.verdict][0]}</span><p>${prose(st.necessity.reason)}</p></li>` : '')).join('')}</ul>` : ''}
-         ${s.questions.length ? `<h2>Questions for the author</h2><ul class="questions">${s.questions.map((q) => `<li>${prose(q)}</li>`).join('')}</ul>` : ''}`,
+         ${D !== 'glance' && s.questions.length ? `<h2>Questions for the author</h2><ul class="questions">${s.questions.map((q) => `<li>${prose(q)}</li>`).join('')}</ul>` : ''}`,
         codeFor(pr, fs, []) || '<p class="code-empty">No finding is tied to a specific line.</p>',
       ];
     }
@@ -520,7 +602,7 @@
   const diffView = () => (store.get('diff', 'unified') === 'split' && !matchMedia('(max-width: 860px)').matches ? 'split' : 'unified');
   const diffBar = () => `<div class="code-bar"><span class="seg-btns" role="group" aria-label="Diff view">${[['unified', 'Unified'], ['split', 'Split']].map(([k, l]) => `<button type="button" data-diff="${k}" class="${store.get('diff', 'unified') === k ? 'on' : ''}" aria-pressed="${store.get('diff', 'unified') === k}">${l}</button>`).join('')}</span></div>`;
 
-  function splitRows(h, marks, long, MAX) {
+  function splitRows(h, marks, long, MAX, th = new Map()) {
     const side = (i, which) => {
       if (i == null) return `<td class="ln empty"></td><td class="sg empty"></td><td class="tx empty"></td>`;
       const [s, o, n, t, hl] = h.lines[i], c = s === '+' ? 'add' : s === '-' ? 'del' : '';
@@ -530,21 +612,28 @@
       const idx = [l, r].filter((x) => x != null), rows = idx.map((x) => x + 1);
       const on = marks.filter((m) => rows.some((x) => x >= m.from && x <= m.to)), first = marks.find((m) => rows.includes(m.from));
       const cls = [long && idx.every((x) => x >= MAX) ? 'more' : '', on.length ? 'pt' : ''].filter(Boolean).join(' ');
-      return `<tr${cls ? ` class="${cls}"` : ''}${on.length ? ` data-pts="${on.map((m) => m.k).join(' ')}"` : ''}><td class="pg">${first ? `<span class="pb" data-pt="${first.k}">${first.k}</span>` : ''}</td>${side(l, 'l')}${side(r, 'r')}</tr>`;
+      return `<tr${cls ? ` class="${cls}"` : ''}${on.length ? ` data-pts="${on.map((m) => m.k).join(' ')}"` : ''}><td class="pg">${first ? `<span class="pb" data-pt="${first.k}">${first.k}</span>` : ''}</td>${side(l, 'l')}${side(r, 'r')}</tr>${(() => { const ts = [...(th.get(l) || []).filter((t) => t.side === 'LEFT' || l === r), ...(l !== r ? (th.get(r) || []).filter((t) => t.side === 'RIGHT') : [])]; return ts.length ? commentRow(ts, 6, long && idx.every((x) => x >= MAX)) : ''; })()}`;
     }).join('');
   }
 
   // marks: [{ k, from, to }] in 1-based rows. Marked rows get a gutter number and stay visible even in long hunks.
+  // Review comments people left on a line, shown under that line as on GitHub. Bodies are markdown; they're shown as
+  // text with code spans and suggestion blocks kept. ponytail: no full markdown; add a renderer if links and lists matter.
+  const threadsAt = (pr, id) => { const m = new Map(); (pr.comments || []).filter((t) => t.hunk === id).forEach((t) => m.set(t.row, [...(m.get(t.row) || []), t])); return m; };
+  const commentBody = (b) => esc(b).replace(/```(?:suggestion)?\n?([\s\S]*?)```/g, '<pre>$1</pre>').replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  const threadHTML = (t) => `<div class="thread">${t.items.map((c) => `<div class="th-c">${c.avatar ? `<img class="av" src="${esc(c.avatar)}" alt="" width="20" height="20" loading="lazy">` : '<span class="av"></span>'}<div class="th-m"><p class="th-h"><b>${esc(c.author)}</b> <span class="muted">${ago(c.at)} ago</span></p><div class="th-b">${commentBody(c.body)}</div></div></div>`).join('')}<a class="th-go" href="${esc(t.items[0].url)}" target="_blank" rel="noopener">Reply on GitHub</a></div>`;
+  const commentRow = (ts, cols, more) => `<tr class="cmt${more ? ' more' : ''}"><td class="pg"></td><td colspan="${cols}">${ts.map(threadHTML).join('')}</td></tr>`;
+
   function hunk(pr, f, h, marks = []) {
     const MAX = 80, long = h.lines.length > MAX + 20 && !marks.some((m) => m.to > MAX), L = LETTER[f.status] || 'M';
-    const split = diffView() === 'split';
-    const rows = split ? splitRows(h, marks, long, MAX) : h.lines.map(([s, o, n, t, hl], i) => {
+    const split = diffView() === 'split', th = threadsAt(pr, h.id), nth = [...th.values()].reduce((a, x) => a + x.length, 0);
+    const rows = split ? splitRows(h, marks, long, MAX, th) : h.lines.map(([s, o, n, t, hl], i) => {
       const on = marks.filter((m) => i + 1 >= m.from && i + 1 <= m.to), first = marks.find((m) => m.from === i + 1);
       const cls = [s === '+' ? 'add' : s === '-' ? 'del' : '', long && i >= MAX ? 'more' : '', on.length ? 'pt' : ''].filter(Boolean).join(' ');
-      return `<tr${cls ? ` class="${cls}"` : ''}${on.length ? ` data-pts="${on.map((m) => m.k).join(' ')}"` : ''}><td class="pg">${first ? `<span class="pb" data-pt="${first.k}">${first.k}</span>` : ''}</td><td class="ln">${o ?? ''}</td><td class="ln">${n ?? ''}</td><td class="sg">${s === ' ' ? '' : s === '-' ? '−' : '+'}</td><td class="tx">${colored(hl) ?? esc(t)}</td></tr>`;
+      return `<tr${cls ? ` class="${cls}"` : ''}${on.length ? ` data-pts="${on.map((m) => m.k).join(' ')}"` : ''}><td class="pg">${first ? `<span class="pb" data-pt="${first.k}">${first.k}</span>` : ''}</td><td class="ln">${o ?? ''}</td><td class="ln">${n ?? ''}</td><td class="sg">${s === ' ' ? '' : s === '-' ? '−' : '+'}</td><td class="tx">${colored(hl) ?? esc(t)}</td></tr>${th.has(i) ? commentRow(th.get(i), 4, long && i >= MAX) : ''}`;
     }).join('');
     return `<div class="hunk${marks.length ? ' marked' : ''}" id="h-${h.id}">
-      <div class="hh"><span class="st st-${L}" title="${esc(f.status)}">${L}</span><a class="p" href="${esc(h.id[0] === 'd' && pr.since ? pr.since.compare : `${pr.url}/files`)}#${f.anchor}" target="_blank" rel="noopener" title="Open on GitHub">${pathHtml(f.path)}</a><span class="at">${h.at ? esc(h.at) : `line ${h.start}`}</span><span class="n">${delta(h.add, h.del)}</span></div>
+      <div class="hh"><span class="st st-${L}" title="${esc(f.status)}">${L}</span><a class="p" href="${esc(h.id[0] === 'd' && pr.since ? pr.since.compare : `${pr.url}/files`)}#${f.anchor}" target="_blank" rel="noopener" title="Open on GitHub">${pathHtml(f.path)}</a><span class="at">${h.at ? esc(h.at) : `line ${h.start}`}</span>${nth ? `<span class="cm-n" title="${plural(nth, 'comment thread')} on these lines">${ic('discuss', 'muted')}${nth}</span>` : ''}<span class="n">${delta(h.add, h.del)}</span></div>
       <div class="scroll"><table class="diff${split ? ' split' : ''}">${split ? '<colgroup><col class="c-pg"><col class="c-ln"><col class="c-sg"><col><col class="c-ln"><col class="c-sg"><col></colgroup>' : ''}<tbody>${rows}</tbody></table></div>
       ${long ? `<button class="expand" data-expand>${h.lines.length - MAX} more lines</button>` : ''}
     </div>`;
@@ -587,6 +676,7 @@
 
   // Layered left to right: break cycles, longest path from the sources, then one barycentre pass to cut crossings.
   // ponytail: no real crossing minimisation; fine for the 3–14 nodes the prompt asks for.
+  const LANES = [['client', 'Browser or app'], ['api', 'API'], ['logic', 'Logic'], ['queue', 'Queue and jobs'], ['data', 'Data'], ['external', 'Outside services']];
   function flowMap(flow, nStops, thumb) {
     const N = flow.nodes.slice(0, 24), at = new Map(N.map((n, i) => [n.id, i]));
     const E = flow.edges.filter((e) => at.has(e.from) && at.has(e.to) && e.from !== e.to).map((e) => ({ ...e, a: at.get(e.from), b: at.get(e.to) }));
@@ -610,10 +700,26 @@
       col.forEach((i, r) => (pos[i] = { c, r }));
     });
     const W = 176, H = 48, GX = 84, GY = 16, P = 8;
-    const tall = Math.max(...C.map((c) => c.length)) * (H + GY) - GY;
+    let tall = Math.max(...C.map((c) => c.length)) * (H + GY) - GY;
     const hasBack = E.some((e) => e.back);
     C.forEach((col) => col.forEach((i, r) => { pos[i].x = P + pos[i].c * (W + GX); pos[i].y = P + (tall - (col.length * (H + GY) - GY)) / 2 + r * (H + GY); }));
-    const width = P * 2 + C.length * (W + GX) - GX, height = P * 2 + tall + (hasBack ? 40 : 0);
+    // Lanes: when every node says which part of the system it lives in, each part gets its own labelled row, so the
+    // map reads as "the browser calls the API, which queues a job, which writes a table". Columns keep the call order.
+    const laned = !thumb && N.every((n) => LANES.some(([k]) => k === n.layer)), LG = laned ? 112 : 0;
+    let lanes = [];
+    if (laned) {
+      let y = P;
+      lanes = LANES.filter(([k]) => N.some((n) => n.layer === k)).map(([k, name]) => {
+        const ids = N.map((_, i) => i).filter((i) => N[i].layer === k), per = new Map();
+        ids.forEach((i) => per.set(pos[i].c, (per.get(pos[i].c) || 0) + 1));
+        const top = y, h = Math.max(...per.values()) * (H + GY) - GY + 12, row = new Map();
+        ids.forEach((i) => { const r = row.get(pos[i].c) || 0; row.set(pos[i].c, r + 1); pos[i].x = LG + P + pos[i].c * (W + GX); pos[i].y = top + 6 + r * (H + GY); });
+        y += h + 4;
+        return { name, top, h };
+      });
+      tall = y - P - 4;
+    }
+    const width = LG + P * 2 + C.length * (W + GX) - GX, height = P * 2 + tall + (hasBack ? 40 : 0);
     const cut = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
     const cutL = (s, n) => (s.length > n ? '…' + s.slice(-(n - 1)) : s);
 
@@ -657,6 +763,7 @@
     if (!thumb) layout = { pos: new Map(N.map((n, i) => [n.id, pos[i]])), W, H };
     return `<svg viewBox="0 0 ${width} ${height}" ${thumb ? 'preserveAspectRatio="xMidYMid meet"' : `style="width:100%;max-width:${width}px;min-width:${Math.round(width * 0.7)}px"`} role="img" aria-label="How the changed parts connect">
       <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z"/></marker>${thumb ? '' : HOP_MARKER}</defs>
+      ${lanes.map((l) => `<g class="lane-band"><rect x="0" y="${l.top}" width="${width}" height="${l.h}" rx="6"/><text x="12" y="${l.top + l.h / 2 + 4}">${l.name}</text></g>`).join('')}
       ${edges}${nodes}${thumb ? '' : '<g class="play"></g>'}</svg>`;
   }
 
@@ -676,7 +783,7 @@
         ${sc.length ? `<span class="seg-btns">${[['map', 'Map'], ['seq', 'Sequence']].map(([v, l]) => `<button data-view="${v}" class="${play.view === v ? 'on' : ''}" aria-pressed="${play.view === v}">${l}</button>`).join('')}</span>` : ''}
         <p class="legend"><span class="lg a">A</span>added <span class="lg m">M</span>modified <span class="lg d">D</span>deleted <span class="lg c"></span>unchanged</p></div>
       ${sc.length ? `<div class="scn-tabs" role="tablist" aria-label="Runtime walkthroughs">${sc.map((x, k) => `<button role="tab" data-scn="${k}" class="${k === play.sc ? 'on' : ''}" aria-selected="${k === play.sc}">${esc(x.title)}</button>`).join('')}</div>` : ''}
-      <div class="map" id="flowview"></div>
+      <div class="map-wrap"><div class="map" id="flowview"></div>${s.flow.nodes.some((n) => n.note) ? '<div class="node-card" id="node-card" aria-live="polite"></div>' : ''}</div>
       ${sc.length ? '<div class="player" id="player"></div>' : '<p class="small muted nosc">Re-read this PR to get step-by-step walkthroughs of what happens at runtime.</p>'}
     </div>`;
   }
@@ -718,25 +825,29 @@
       <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z"/></marker>${HOP_MARKER}</defs>${heads}${msgs}</svg>`;
   }
 
-  // The current hop: controls, the numbered hop list, the code that does it, and its highlight on the diagram.
+  // The current hop sits between the diagram and its code, so all three fit on one screen (keeping words next to
+  // what they describe; see the README's notes on reading load). The full list of hops stays one click away.
   function paintStep() {
     const s = cur?.story, sc = s?.scenarios?.[play.sc], box = $('#player');
     if (!sc || !box) return;
     play.i = Math.max(0, Math.min(sc.steps.length - 1, play.i));
     const st = sc.steps[play.i], last = play.i === sc.steps.length - 1, N = new Map(s.flow.nodes.map((n) => [n.id, n]));
     const name = (id) => `<code>${esc(N.get(id)?.label || id)}</code>`;
+    const ft = (x) => `<span class="hop-ft">${name(x.from)}${x.from === x.to ? '' : ` <span class="arr" aria-label="to">→</span> ${name(x.to)}`}<span class="kind">${esc(x.kind)}</span>${x.data ? `<span class="pkt">${esc(x.data)}</span>` : ''}</span>`;
+    const open = $('#player .hops-all')?.open;
     box.innerHTML = `<div class="pbar-row">
         <button class="btn primary" data-play>${play.timer ? 'Pause' : last && play.i ? 'Replay' : 'Play'} <kbd>space</kbd></button>
         <button class="icon-btn" data-pstep="-1" aria-label="Previous step" ${play.i ? '' : 'disabled'}>‹</button>
-        <span class="pcount">Step <b>${play.i + 1}</b> of ${sc.steps.length}</span>
+        <span class="scrub" role="group" aria-label="Steps">${sc.steps.map((_, k) => `<button type="button" data-hop="${k}" class="${k === play.i ? 'on' : k < play.i ? 'seen' : ''}" aria-label="Step ${k + 1}"${k === play.i ? ' aria-current="step"' : ''}>${k + 1}</button>`).join('')}</span>
         <button class="icon-btn" data-pstep="1" aria-label="Next step" ${last ? 'disabled' : ''}>›</button>
         <span class="trigger"><span class="muted">Starts when</span> ${prose(sc.trigger)}</span>
       </div>
-      <ol class="hops">${sc.steps.map((x, k) => `<li data-hop="${k}" class="${k === play.i ? 'on' : k < play.i ? 'seen' : ''}"${k === play.i ? ' aria-current="step"' : ''}>
-        <span class="pn">${k + 1}</span>
-        <span><span class="hop-ft">${name(x.from)}${x.from === x.to ? '' : ` <span class="arr" aria-label="to">→</span> ${name(x.to)}`}<span class="kind">${esc(x.kind)}</span>${x.data ? `<span class="pkt">${esc(x.data)}</span>` : ''}</span>
-        <span class="hop-w">${prose(x.what)}</span></span></li>`).join('')}</ol>
-      <div class="hop-code">${st.hunk ? hunkById(cur.pr, st.hunk, [{ k: play.i + 1, from: st.start, to: st.end }]) : '<p class="code-empty">This hop runs code the PR leaves unchanged.</p>'}</div>`;
+      <div class="hop-now" aria-live="polite"><span class="pn">${play.i + 1}</span><span>${ft(st)}<span class="hop-w">${prose(st.what)}</span></span></div>
+      <div class="hop-code">${st.hunk ? hunkById(cur.pr, st.hunk, [{ k: play.i + 1, from: st.start, to: st.end }]) : '<p class="code-empty">This hop runs code the PR leaves unchanged.</p>'}</div>
+      <details class="hops-all"${open ? ' open' : ''}><summary>All ${sc.steps.length} steps</summary><ol class="hops">${sc.steps.map((x, k) => `<li data-hop="${k}" class="${k === play.i ? 'on' : k < play.i ? 'seen' : ''}">
+        <span class="pn">${k + 1}</span><span>${ft(x)}<span class="hop-w">${prose(x.what)}</span></span></li>`).join('')}</ol></details>`;
+    const hc = $('.hop-code', box), mark = hc && $('.pb', hc); // bring the hop's own lines into view inside the code box
+    if (mark) hc.scrollTop = Math.max(0, mark.closest('tr').offsetTop - 48);
     const svg = $('#flowview svg');
     if (!svg) return;
     if (play.view === 'seq') { svg.outerHTML = seqSVG(sc, s.flow.nodes); return; }
@@ -922,7 +1033,14 @@
     status.innerHTML = '';
     document.body.dataset.view = 'landing';
     const local = me?.mode === 'local';
-    const cta = me?.user
+    const cta = !me?.user && me?.waitlist
+      ? `<form class="l-wait" novalidate>
+          <input type="email" name="email" required autocomplete="email" placeholder="you@company.com" aria-label="Your work email">
+          <button class="l-btn" type="submit">Join the waitlist</button>
+          <p class="l-wait-msg" role="status" aria-live="polite"></p>
+          <p class="l-wait-note">One email when your invite is ready, and nothing else.${local ? '' : ' Already invited? <a href="/auth/login">Sign in with GitHub</a>'}</p>
+        </form>`
+      : me?.user
       ? `<a class="l-btn" href="#/">Open your pull requests<kbd>O</kbd></a><a class="l-btn ghost" href="#tour" data-jump="tour">See a real tour<kbd>T</kbd></a>`
       : local
       ? '<p class="l-note">This Readthrough runs on your machine and reads GitHub through the <code>gh</code> CLI. Run <code>gh auth login</code>, then reload.</p>'
@@ -1002,6 +1120,28 @@
 
   // ---------- events ----------
 
+  // The landing's waitlist form: one address, then a thank-you in place of the form.
+  document.addEventListener('submit', async (e) => {
+    if (!e.target.matches('.l-wait')) return;
+    e.preventDefault();
+    const form = e.target, input = form.elements.email, msg = $('.l-wait-msg', form), btn = $('button', form);
+    const email = input.value.trim();
+    if (!input.checkValidity() || !email) { msg.textContent = 'Enter your email address.'; msg.className = 'l-wait-msg bad'; input.focus(); return; }
+    btn.disabled = true;
+    msg.textContent = '';
+    try {
+      const r = await fetch('/api/waitlist', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'That didn\'t go through. Try again.');
+      form.outerHTML = `<p class="l-wait-done">${ic('check', 'ok')}<span>You're on the list. We'll write to <b>${esc(email)}</b> when your invite is ready.</span></p>`;
+    } catch (err) {
+      msg.textContent = err.message;
+      msg.className = 'l-wait-msg bad';
+      btn.disabled = false;
+    }
+  });
+  document.addEventListener('input', (e) => { if (e.target.closest?.('.l-wait')) $('.l-wait-msg', e.target.form).textContent = ''; });
+
   document.addEventListener('submit', (e) => {
     if (!e.target.matches('.go')) return;
     e.preventDefault();
@@ -1029,7 +1169,7 @@
     if (e.target.closest?.('[data-signout]')) return signOut();
     const jump = e.target.closest?.('[data-jump]');
     if (jump) { e.preventDefault(); return document.getElementById(jump.dataset.jump)?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); }
-    const t = e.target.closest?.('[data-page],[data-diff],[data-view],[data-scn],[data-pstep],[data-play],[data-hop],[data-sort],[data-settings],[data-pt],[data-sel],[data-hunk],[data-ack],[data-step],[data-expand],[data-fresh]');
+    const t = e.target.closest?.('[data-depth],[data-page],[data-diff],[data-view],[data-scn],[data-pstep],[data-play],[data-hop],[data-sort],[data-settings],[data-pt],[data-sel],[data-hunk],[data-ack],[data-step],[data-expand],[data-fresh]');
     if (!t) return;
     const ds = t.dataset;
     if (ds.view) { play.view = ds.view; $$('[data-view]').forEach((b) => { b.classList.toggle('on', b === t); b.setAttribute('aria-pressed', b === t); }); paintView(); }
@@ -1037,6 +1177,7 @@
     else if (ds.pstep) { stopPlay(); goHop(play.i + +ds.pstep); }
     else if ('play' in ds) togglePlay();
     else if (ds.hop) { stopPlay(); goHop(+ds.hop); }
+    else if (ds.depth) { store.set('depth', ds.depth); if ($('.tour') && cur?.story) $('.tour').innerHTML = tour(); show(); }
     else if (ds.page) { homeData.page = Math.max(0, +ds.page); refreshRecent(); $('.home2')?.scrollIntoView({ block: 'start' }); }
     else if (ds.diff) { const y = $('#code')?.scrollTop; store.set('diff', ds.diff); show(); if ($('#code')) $('#code').scrollTop = y; }
     else if (ds.sort) { store.set('sort', ds.sort); lists(); }
@@ -1057,7 +1198,7 @@
     if (e.key === 'Enter' && e.target.matches?.('.node.link')) return select(+e.target.dataset.sel);
     if (document.body.dataset.view === 'landing' && (e.key === 'o' || e.key === 't')) { // the shortcuts shown on the landing buttons
       e.preventDefault();
-      return e.key === 'o' ? $('.l-btn:not(.ghost)')?.click() : document.getElementById('tour')?.scrollIntoView({ behavior: 'smooth' });
+      return e.key === 'o' ? ($('.l-wait input') ? $('.l-wait input').focus() : $('.l-btn:not(.ghost)')?.click()) : document.getElementById('tour')?.scrollIntoView({ behavior: 'smooth' });
     }
     if (!cur?.pr) return;
     if ($('#player') && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) { e.preventDefault(); stopPlay(); return goHop(play.i + (e.key === 'ArrowRight' ? 1 : -1)); }
@@ -1075,6 +1216,21 @@
   });
   document.addEventListener('mouseout', (e) => { if (e.target.closest?.(PT) && !e.relatedTarget?.closest?.(PT)) point(null); });
   document.addEventListener('focusin', (e) => { if (e.target.matches?.('.points [data-pt]')) point(e.target.dataset.pt, true); });
+
+  // Pointing at a box (or tabbing to it) fills the card under the map: what it is, where, and what this PR changes in it.
+  const STATUS_WORD = { new: 'Added', changed: 'Changed', removed: 'Removed', context: 'Unchanged, shown for context' };
+  const nodeCard = (e) => {
+    const g = e.target.closest?.('.map .node'), card = $('#node-card');
+    if (!g || !card || !cur?.story) return;
+    const n = cur.story.flow.nodes[+g.dataset.node];
+    if (!n) return;
+    card.innerHTML = `<b>${esc(n.label)}</b><span class="nc-st">${STATUS_WORD[n.status] || ''}</span><code>${esc(n.where)}</code>${n.note ? `<p>${prose(n.note)}</p>` : ''}${g.dataset.sel ? `<span class="nc-go">Click to open stop ${+g.dataset.sel + 1}</span>` : ''}`;
+    card.classList.add('on');
+  };
+  document.addEventListener('mouseout', (e) => { if (e.target.closest?.('.map .node') && !e.relatedTarget?.closest?.('.map .node')) $('#node-card')?.classList.remove('on'); });
+  document.addEventListener('focusout', (e) => { if (e.target.closest?.('.map .node')) $('#node-card')?.classList.remove('on'); });
+  document.addEventListener('mouseover', nodeCard);
+  document.addEventListener('focusin', nodeCard);
 
   // Hovering a box dims everything it doesn't touch.
   document.addEventListener('mouseover', (e) => {

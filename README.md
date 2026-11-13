@@ -92,7 +92,16 @@ docker run -p 4400:4400 --env-file .env -v readthrough-data:/data readthrough
 
 Put it behind HTTPS (your load balancer or reverse proxy) at `PUBLIC_URL`. Cookies are marked `Secure` and HSTS is sent when `PUBLIC_URL` starts with `https://`.
 
-**Access:** people only see PRs their own GitHub account can read, in repositories where the app is installed. `READTHROUGH_ALLOWED_ORGS` restricts sign-in to members of the listed organizations.
+**Or deploy free on Render, with Neon for Postgres.** `render.yaml` describes the whole service:
+
+1. On [Neon](https://neon.com), create a project and copy its connection string.
+2. Create the GitHub App (step 1) with the callback `https://readthrough.xyz/auth/callback`.
+3. On [Render](https://render.com): New → Blueprint, pick this repository. Render reads `render.yaml`, generates `READTHROUGH_SECRET`, and asks for `DATABASE_URL` and the three GitHub App values.
+4. In the service's Custom Domains, Render shows the DNS records for `readthrough.xyz` and `www`; add them at your registrar. HTTPS is issued automatically.
+
+Render's free plan sleeps after 15 minutes without traffic, and the next visit takes about a minute to wake it; a paid instance removes that. Reads are unaffected by proxy timeouts: the page follows a read over a Server-Sent Events stream with a heartbeat, and a dropped stream reconnects to the same read.
+
+**Access:** people only see PRs their own GitHub account can read, in repositories where the app is installed. `READTHROUGH_ALLOWED_ORGS` restricts sign-in to members of the listed organizations. `READTHROUGH_WAITLIST=1` puts a waitlist on the landing page in place of sign-in: visitors leave an email (validated, rate-limited, stored once), and you read the list with `select email, created_at from waitlist order by created_at;`. Invited people still sign in through the link under the form.
 
 ## Security
 

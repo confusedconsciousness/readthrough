@@ -1,0 +1,31 @@
+# Render Blueprint: one web service built from the Dockerfile, on Render's free plan.
+# Postgres lives elsewhere (Neon's free plan works); paste its connection string as DATABASE_URL when Render asks.
+# Values marked sync: false are asked for once when you create the Blueprint and are never stored in this repo.
+services:
+  - type: web
+    name: readthrough
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    autoDeploy: true
+    domains:
+      - readthrough.xyz
+      - www.readthrough.xyz
+    envVars:
+      - key: PUBLIC_URL
+        value: https://readthrough.xyz
+      - key: DATABASE_URL
+        sync: false
+      - key: READTHROUGH_SECRET # seals GitHub tokens and AI keys at rest; changing it signs everyone out
+        generateValue: true
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_APP_SLUG
+        sync: false
+      - key: READTHROUGH_ALLOWED_ORGS # optional: comma-separated GitHub organizations allowed to sign in
+        sync: false
+      - key: READTHROUGH_WAITLIST
+        value: "1"

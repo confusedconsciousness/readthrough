@@ -59,6 +59,11 @@ create table if not exists opened (
   num int not null,
   at timestamptz not null default now(),
   primary key (user_id, owner, repo, num)
+);
+create table if not exists waitlist (
+  email text primary key,
+  note text,
+  created_at timestamptz not null default now()
 );`;
 
 const LITE_SCHEMA = `
@@ -107,6 +112,11 @@ create table if not exists opened (
   num integer not null,
   at text not null,
   primary key (user_id, owner, repo, num)
+);
+create table if not exists waitlist (
+  email text primary key,
+  note text,
+  created_at text not null
 );`;
 
 // Returns which store is in use. A DATABASE_URL that can't be reached is an error, never a quiet switch to SQLite:
@@ -233,6 +243,10 @@ async function toured(shas) {
   return new Set(rows.map((r) => `${r.owner}/${r.repo}/${r.num}@${r.sha}`));
 }
 
+// The waitlist: one row per address. Joining twice keeps the first row (and its date), so the order is first come.
+const joinWaitlist = (email, note) => q(`insert into waitlist (email, note, created_at) values ($1, $2, $3) on conflict (email) do nothing`, [email, note || null, now()]);
+const waitlist = () => q('select email, note, created_at from waitlist order by created_at');
+
 const markOpened = (userId, ref) => q(`insert into opened (user_id, owner, repo, num, at) values ($1, $2, $3, $4, $5)
   on conflict (user_id, owner, repo, num) do update set at = $5`, [userId, ...keyOf(ref), now()]);
 
@@ -258,6 +272,6 @@ async function recentTours(userId, reader, { q: text = '', limit = 10, offset = 
 
 module.exports = {
   init, seal, unseal, upsertUser, tokensOf, setTokens, createSession, sessionUser, deleteSession, pruneSessions,
-  getAI, setAI, getTour, putTour, previousTour, toured, markOpened, recentTours,
+  getAI, setAI, getTour, putTour, previousTour, toured, markOpened, recentTours, joinWaitlist, waitlist,
   end: () => (kind === 'pg' ? pool?.end() : lite?.close()),
 };
