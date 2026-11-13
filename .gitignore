@@ -10,3 +10,4 @@ readthrough.db*
 .neon
 # Neon connection details from `neon deploy` (production branch); copy DATABASE_URL into Render
 .env.neon
+readthrough.log

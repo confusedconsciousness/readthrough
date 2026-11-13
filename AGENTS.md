@@ -15,7 +15,7 @@ Don't repeat anything personal a check prints (email addresses, organisation nam
 
 1. **Node 22.13 or newer (ask).** Check: `node --version`. Older versions lack the built-in SQLite the app uses. To install: `brew install node` on macOS, otherwise https://nodejs.org.
 2. **GitHub CLI (ask).** Check: `gh --version`. To install: `brew install gh` on macOS, otherwise https://cli.github.com. Local mode reads GitHub through it.
-3. **The code.** Check whether you're already in it: `git remote get-url origin` should end in `readthrough.git`, and `ls server.js app.js package.json` should list all three. If not, run `git clone https://github.com/confusedconsciousness/readthrough.git && cd readthrough`.
+3. **The code.** Check: `ls server.js app.js package.json` lists all three, and you're in the folder that holds them. If they aren't there, run `git clone https://github.com/confusedconsciousness/readthrough.git && cd readthrough`.
 4. **Dependencies.** `npm ci`. Check: it exits 0 and `node_modules/pg` exists. There's no build step after this.
 5. **GitHub sign-in (person).** Check: `gh auth status`. Readthrough uses the **active** account and sees exactly what it can see.
    - Not logged in: ask the person to run `gh auth login`. The default scopes are enough.
@@ -26,17 +26,17 @@ Don't repeat anything personal a check prints (email addresses, organisation nam
    - **Neither:** once the app is up, the person pastes an Anthropic or OpenAI-compatible API key in Settings (the gear button). Don't handle the key for them.
 
    The app starts on Claude Code with Sonnet 5.5. If only Codex or a key works, tell the person to choose it in Settings before the first read.
-7. **Start it.** First check that the port is free: `lsof -iTCP:4400 -sTCP:LISTEN` should print nothing. If something holds it, ask the person whether it's an old Readthrough to stop. Otherwise use another port, and replace `4400` with it in every check below.
-   - **In Claude Code,** on port 4400: start the preview server `readthrough` from `.claude/launch.json`.
-   - **Anywhere else,** or on another port: `PORT=4400 npm start > readthrough.log 2>&1 &`.
+7. **Start it.** Pick the port: 4400 unless it's taken. Check with `lsof -iTCP:4400 -sTCP:LISTEN`, which prints nothing when the port is free. If it's taken, `curl -s http://localhost:4400/api/me` tells you whether it's a Readthrough (it answers with `"mode"`); ask the person whether to stop it. Otherwise use 4401. Below, `PORT` means the port you picked.
+   - **In Claude Code,** on 4400 only: start the preview server `readthrough` from `.claude/launch.json`.
+   - **Anywhere else, or on another port:** `PORT=4401 npm start > readthrough.log 2>&1 &` (with your port). `readthrough.log` is gitignored.
 
-   Check the log. A first line `.env not found. Continuing without it.` is normal, since `.env` is optional locally. Then it should say `readthrough (local mode, SQLite at …) on http://localhost:4400`. Next:
+   Wait until it listens: `until lsof -iTCP:$PORT -sTCP:LISTEN >/dev/null; do sleep 1; done`. In the log, npm's own lines and `.env not found. Continuing without it.` are normal, since `.env` is optional locally. Look for `readthrough (local mode, SQLite at …) on http://localhost:PORT`. Then:
 
    ```bash
    curl -s http://localhost:4400/api/me
    ```
 
-   This should return `"mode":"local"` and a `"user"` whose `login` is the account from step 5. `"user":null` means `gh` isn't signed in.
+   This should return `"mode":"local"` and a `"user"` whose `login` is the account from step 5. `"user":null` means `gh` isn't signed in. Use your port in this check and the ones below.
 8. **Open it.** With a browser, open http://localhost:4400: the landing page shows a live demo tour and the console is empty. Then `#/` shows the home page. "Your tours" is empty on a first run, and open PRs and review requests from GitHub appear beside it. Without a browser, check that these each return 200:
 
    ```bash
