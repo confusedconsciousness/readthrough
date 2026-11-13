@@ -287,7 +287,7 @@
     const install = me?.mode === 'hosted' && me.installs === 0 ? `<a class="h-install" href="${esc(installURL())}" target="_blank" rel="noopener"><span><b>Readthrough can't see any repositories yet</b><span class="muted">Choose which ones it may read. Access is read-only, and you can change it any time.</span></span><span class="btn primary">Choose repositories</span></a>` : '';
     box.innerHTML = `${install}${next ? `<a class="resume" href="#/${esc(next.key)}">
         <div class="resume-copy"><p class="sub">Continue reading · ${keyLabel(next.key)} ${stateChip(next.state)}</p><h2>${esc(next.title || next.key)}</h2><p class="gist">${prose(next.gist)}</p>
-          <div class="resume-foot">${pbar(p)}<span>${progText(p)}</span>${recChip(next.rec)}<span class="btn primary">Resume tour</span></div></div>
+          <div class="resume-foot"><span class="resume-prog">${pbar(p)}<span>${progText(p)}</span>${recChip(next.rec)}</span><span class="btn primary">Resume tour</span></div></div>
         <div class="resume-map">${thumbOf(next)}</div></a>` : ''}
       <div class="resume-cols"><div>${needs()}</div><div>${sec(q ? 'Matching tours' : 'Your tours', total, rest.length ? `<ul class="t-list compact">${rest.map(tourRow).join('')}</ul>${pager}` : '', next ? 'No other tours yet.' : noTours)}</div></div>`;
   }
@@ -1136,7 +1136,7 @@
           <div><h4>Bring your AI</h4><span>Claude</span><span>OpenAI</span><span>OpenRouter</span><span>Claude Code</span><span>Codex</span></div>
         </div>
         <p class="f-mark" aria-hidden="true">Read<span>through</span></p>
-        <div class="f-bot"><span>© 2026 Readthrough</span><span>Read-only GitHub access · Your own AI keys</span></div>
+        <div class="f-bot"><span>© 2026 Readthrough <span class="by">by <a href="https://0xkishan.com" target="_blank" rel="noopener">0xkishan.com</a></span></span><span>Read-only GitHub access · Your own AI keys</span></div>
       </footer>
     </div>`;
     try {

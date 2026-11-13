@@ -668,6 +668,8 @@ body[data-view="landing"] .account .signin { border-color: var(--line-2); }
 .f-top nav a:hover::after { transform: rotate(90deg); color: var(--fg); }
 .f-mark { margin: 48px 0 -0.1em; font: 700 calc((100vw - 64px) * 0.137)/0.8 var(--display); letter-spacing: -0.06em; text-transform: uppercase; color: var(--fg); white-space: nowrap; overflow: hidden; }
 .f-mark span { color: var(--blue); }
+.f-bot .by { margin-left: 6px; text-transform: none; letter-spacing: 0.02em; }
+.f-bot .by a { color: var(--fg); }
 .f-bot { position: relative; background: var(--bg); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin: 0 -32px; padding: 14px 32px; border-top: 1px solid var(--line); font: 11px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
 .brand-sm { display: inline-flex; align-items: center; gap: 7px; color: var(--fg); font-weight: 700; font-family: var(--display); }
 .brand-sm svg { width: 15px; height: 15px; fill: var(--fg); }
@@ -911,9 +913,9 @@ body[data-view="landing"] .account .signin { border-color: var(--line-2); }
 .resume .sub { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 12.5px; color: var(--fg-2); }
 .resume h2 { display: block; margin: 0 0 10px; font: 700 26px/1.15 var(--display); letter-spacing: -0.02em; }
 .resume .gist { -webkit-line-clamp: 3; font-size: 14px; }
-.resume-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin-top: 20px; font-size: 13px; color: var(--fg-2); }
+.resume-foot { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; margin-top: 20px; font-size: 13px; color: var(--fg-2); }
+.resume-prog { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .resume-foot .pbar { width: 120px; }
-.resume-foot .btn { margin-left: auto; }
 .resume-map { height: 220px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
 .resume-map svg { width: 100%; height: 100%; }
 .resume-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; align-items: start; }
@@ -925,7 +927,7 @@ body[data-view="landing"] .account .signin { border-color: var(--line-2); }
   .h-head { flex-wrap: wrap; }
   .h-head .go { max-width: none; width: 100%; }
 }
-.resume-foot > span, .resume-foot .btn { white-space: nowrap; }
+.resume-prog > span, .resume-foot .btn { white-space: nowrap; }
 .h-search input { height: 36px; font-size: 14px; padding-right: 34px; }
 .h-search kbd { top: 9px; right: 10px; }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 14px; font-size: 12.5px; color: var(--fg-2); }

@@ -4,7 +4,7 @@
   "description": "A guided review of GitHub pull requests.",
   "type": "commonjs",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
