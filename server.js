@@ -22,7 +22,11 @@ const SECURE = PUBLIC_URL.startsWith('https://');
 const APP_HOST = new URL(PUBLIC_URL).host;
 const SITE_URL = APP_HOST.startsWith('app.') ? PUBLIC_URL.replace('//app.', '//') : null;
 const HOSTS = SITE_URL ? { app: PUBLIC_URL, site: SITE_URL } : {};
-const ALLOWED = (process.env.READTHROUGH_ALLOWED_ORGS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+const list = (v) => (v || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+const ALLOWED = list(process.env.READTHROUGH_ALLOWED_ORGS);
+// Who may sign in: these GitHub logins, plus members of ALLOWED orgs. With the waitlist on and both lists empty,
+// nobody can: a closed beta stays closed until you name people.
+const ALLOWED_USERS = list(process.env.READTHROUGH_ALLOWED_USERS);
 const APP_SLUG = process.env.GITHUB_APP_SLUG || '';
 
 function fail(msg) { console.error(`readthrough: ${msg}`); process.exit(1); }
@@ -458,6 +462,8 @@ async function context(req) {
     return { user: await localUser, token };
   }
   const user = await db.sessionUser(cookies(req).readthrough_sid);
+  // Taking a login off READTHROUGH_ALLOWED_USERS ends that person's sessions at once (org members are checked at sign-in).
+  if (user && gated() && !ALLOWED.length && !ALLOWED_USERS.includes(user.login.toLowerCase())) return null;
   return user && { user, token: await freshToken(user) };
 }
 
@@ -527,11 +533,14 @@ async function signIn(req, res, u) {
   try {
     const tokens = await auth.fromCode(u.searchParams.get('code'));
     const me = await gh(tokens.access, 'user');
-    if (ALLOWED.length) {
+    let allowed = !gated() || ALLOWED_USERS.includes(me.login.toLowerCase());
+    if (!allowed && ALLOWED.length) {
       const { installations = [] } = await gh(tokens.access, 'user/installations');
-      if (!installations.some((i) => ALLOWED.includes(i.account.login.toLowerCase()))) {
-        return send(res, 403, page('Not on the list', `This Readthrough is for members of ${escHTML(ALLOWED.join(', '))}. Your GitHub account, ${escHTML(me.login)}, doesn't have access to any of them through Readthrough's GitHub App.`), TYPES.html);
-      }
+      allowed = installations.some((i) => ALLOWED.includes(i.account.login.toLowerCase()));
+    }
+    if (!allowed) {
+      const join = WAITLIST ? ` <a href="${escHTML(SITE_URL || '/')}">Join the waitlist</a> and you'll get an email when your invite is ready.` : '';
+      return send(res, 403, page('Not on the list yet', `Readthrough is invite-only for now, and your GitHub account, ${escHTML(me.login)}, isn't on the list.${join}`), TYPES.html);
     }
     const user = await db.upsertUser(me, tokens);
     const sid = await db.createSession(user.id);
@@ -546,6 +555,7 @@ async function signIn(req, res, u) {
 // READTHROUGH_WAITLIST=1 puts a waitlist form on the landing page in place of sign-in. Anyone may join; nothing else
 // about the API opens up. Read the list with: select email, note, created_at from waitlist order by created_at;
 const WAITLIST = /^(1|true|yes)$/i.test(process.env.READTHROUGH_WAITLIST || '');
+const gated = () => WAITLIST || ALLOWED_USERS.length > 0 || ALLOWED.length > 0;
 const EMAIL = /^[^\s@<>"]{1,64}@[^\s@<>".]+(\.[^\s@<>".]+)+$/;
 // ponytail: per-process memory, keyed by the address the platform's proxy saw (the last X-Forwarded-For entry);
 // fine for one instance, move it into Postgres if you run several.

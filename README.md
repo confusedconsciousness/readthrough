@@ -103,7 +103,7 @@ When `PUBLIC_URL` is on an `app.` subdomain (`https://app.readthrough.xyz`), poi
 
 Render's free plan sleeps after 15 minutes without traffic, and the next visit takes about a minute to wake it; a paid instance removes that. Reads are unaffected by proxy timeouts: the page follows a read over a Server-Sent Events stream with a heartbeat, and a dropped stream reconnects to the same read.
 
-**Access:** people only see PRs their own GitHub account can read, in repositories where the app is installed. `READTHROUGH_ALLOWED_ORGS` restricts sign-in to members of the listed organizations. `READTHROUGH_WAITLIST=1` puts a waitlist on the landing page in place of sign-in: visitors leave an email (validated, rate-limited, stored once), and you read the list with `select email, created_at from waitlist order by created_at;`. Invited people still sign in through the link under the form.
+**Access:** people only see PRs their own GitHub account can read, in repositories where the app is installed. `READTHROUGH_ALLOWED_ORGS` restricts sign-in to members of the listed organizations. `READTHROUGH_ALLOWED_USERS` (comma-separated GitHub logins) lets only those people sign in, alongside any members of the allowed organizations. Taking a login off the list ends that person's sessions on their next request. `READTHROUGH_WAITLIST=1` puts a waitlist on the landing page: visitors leave an email (validated, rate-limited, stored once), and you read the list with `select email, created_at from waitlist order by created_at;`. With the waitlist on, sign-in is closed to everyone not on one of the two lists, even when both are empty, so invite people by adding their login.
 
 ## Security
 

@@ -1118,7 +1118,7 @@
 
       <footer class="l-foot">
         <div class="f-top">
-          <div class="f-brand"><span class="brand-sm"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="12.5" r="2"/><circle cx="12.5" cy="3.5" r="2"/><path d="M3.5 10.5V8a3 3 0 0 1 3-3h4"/></svg>Readthrough</span>
+          <div class="f-brand"><span class="brand-sm"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="12.5" r="2"/><circle cx="12.5" cy="3.5" r="2"/><path d="M3.5 12.5V6.5a3 3 0 0 1 3-3h6"/></svg>Readthrough</span>
             <h2>Read it before you merge it.</h2>
             <p>Readthrough explains pull requests for teams that review AI-written code.</p></div>
           <nav aria-label="Product"><h4>Product</h4><a href="#tour" data-jump="tour">Live demo</a><a href="#features" data-jump="features">Features</a><a href="#security" data-jump="security">Security</a></nav>

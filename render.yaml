@@ -28,5 +28,7 @@ services:
         sync: false
       - key: READTHROUGH_ALLOWED_ORGS # optional: comma-separated GitHub organizations allowed to sign in
         sync: false
+      - key: READTHROUGH_ALLOWED_USERS # comma-separated GitHub logins allowed to sign in; with the waitlist on, nobody else can
+        sync: false
       - key: READTHROUGH_WAITLIST
         value: "1"
