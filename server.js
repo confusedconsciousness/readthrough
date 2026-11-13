@@ -592,14 +592,17 @@ async function handle(req, res) {
   const site = req.headers['sec-fetch-site'];
   if ((u.pathname.startsWith('/api/') || req.method !== 'GET') && site && !['same-origin', 'none'].includes(site)) return send(res, 403, { error: 'Cross-site request refused' });
 
-  // The display typeface, self-hosted (SIL OFL, see fonts/OFL.txt) so pages make no outside font requests.
-  const FONTS = { '/fonts/schibsted-600.woff2': 1, '/fonts/schibsted-700.woff2': 1 };
-  if (req.method === 'GET' && FONTS[u.pathname]) {
-    return send(res, 200, fs.readFileSync(path.join(__dirname, u.pathname)), 'font/woff2', { 'cache-control': 'public, max-age=31536000, immutable' });
+  // Binary files: the display typeface, self-hosted (SIL OFL, see fonts/OFL.txt) so pages make no outside font
+  // requests, and the link-preview image that chat apps and search engines show.
+  const FILES = { '/fonts/schibsted-600.woff2': 'font/woff2', '/fonts/schibsted-700.woff2': 'font/woff2', '/og.png': 'image/png' };
+  if (req.method === 'GET' && FILES[u.pathname]) {
+    return send(res, 200, fs.readFileSync(path.join(__dirname, u.pathname)), FILES[u.pathname], { 'cache-control': 'public, max-age=86400' });
   }
   if (req.method === 'GET' && STATIC[u.pathname]) {
     const f = STATIC[u.pathname];
-    return send(res, 200, fs.readFileSync(path.join(__dirname, f), 'utf8'), TYPES[f.split('.').pop()]);
+    let text = fs.readFileSync(path.join(__dirname, f), 'utf8');
+    if (f === 'index.html') text = text.replaceAll('%SITE%', SITE_URL || PUBLIC_URL); // link previews need absolute URLs
+    return send(res, 200, text, TYPES[f.split('.').pop()]);
   }
   if (u.pathname === '/auth/login' && req.method === 'GET') {
     if (MODE === 'local') return redirect(res, '/');
