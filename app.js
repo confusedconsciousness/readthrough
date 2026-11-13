@@ -113,7 +113,7 @@
     // The bare address is the front door: the landing page. The app itself lives under #/ (your tours) and #/owner/repo/n.
     // With split hosts (me.site), the bare domain is only the landing page and app.… is only the app.
     const onApp = me?.site && location.origin === me.app;
-    if (me?.site && !onApp && location.hash.startsWith('#/') && location.hash !== '#/about') return location.replace(me.app + '/' + location.hash);
+    if (me?.site && !onApp && parse()) return location.replace(me.app + '/' + location.hash);
     if (!me?.user || location.hash === '#/about' || (!onApp && ['', '#'].includes(location.hash))) return landing();
     const h = parse();
     document.body.dataset.view = h ? 'pr' : 'home';
