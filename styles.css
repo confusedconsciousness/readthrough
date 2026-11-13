@@ -911,7 +911,7 @@ body[data-view="landing"] .account .signin { border-color: var(--line-2); }
 .resume .sub { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 12.5px; color: var(--fg-2); }
 .resume h2 { display: block; margin: 0 0 10px; font: 700 26px/1.15 var(--display); letter-spacing: -0.02em; }
 .resume .gist { -webkit-line-clamp: 3; font-size: 14px; }
-.resume-foot { display: flex; align-items: center; gap: 12px; margin-top: 20px; font-size: 13px; color: var(--fg-2); }
+.resume-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin-top: 20px; font-size: 13px; color: var(--fg-2); }
 .resume-foot .pbar { width: 120px; }
 .resume-foot .btn { margin-left: auto; }
 .resume-map { height: 220px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
@@ -921,7 +921,6 @@ body[data-view="landing"] .account .signin { border-color: var(--line-2); }
 @media (max-width: 960px) {
   .resume, .resume-cols { grid-template-columns: minmax(0, 1fr); }
   .resume { padding: 18px; gap: 18px; }
-  .resume-foot { flex-wrap: wrap; }
   .resume-map { height: 160px; }
   .h-head { flex-wrap: wrap; }
   .h-head .go { max-width: none; width: 100%; }
