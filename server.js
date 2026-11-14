@@ -5,6 +5,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const os = require('node:os');
+const { spawn } = require('node:child_process');
 const db = require('./db');
 const { gh, graphql, oauth, localToken } = require('./github');
 const ai = require('./ai');
@@ -52,7 +54,7 @@ const auth = MODE === 'hosted' && oauth({ clientId: process.env.GITHUB_CLIENT_ID
 
 // Accepts github.com/o/r/pull/12, o/r#12 or o/r/12. Owner and repo are lowercased so one PR has one key.
 function parseRef(s) {
-  const m = String(s || '').trim().match(/^(?:https?:\/\/)?(?:www\.)?(?:github\.com\/)?([\w.-]+)\/([\w.-]+)(?:\/pull\/|#|\/)(\d+)/);
+  const m = String(s || '').trim().match(/^(?:https?:\/\/)?(?:www\.)?(?:github\.com\/)?([\w.-]+)\/([\w.-]+)(?:\/pull\/|#|\/)(-?\d+)/);
   return m && { owner: m[1].toLowerCase(), repo: m[2].toLowerCase(), num: +m[3] };
 }
 const refKey = (ref) => `${ref.owner}/${ref.repo}/${ref.num}`;
@@ -397,6 +399,163 @@ async function story(ctx, ref, fresh, onStep, aiKey) {
   return watch(entry, onStep);
 }
 
+// ---------- codebase tours ----------
+
+// A tour of a repository, or of the part a question asks about. It reuses the PR machinery: its key is owner/repo
+// with a negative number derived from the question, and the code the model points at becomes hunks of unchanged
+// lines, so the PR views draw it. The model reads a snapshot of the default branch (GitHub's tarball), unpacked
+// into a temporary folder that's removed after the read.
+const parseRepo = (s) => { const m = String(s || '').trim().match(/^(?:https?:\/\/)?(?:www\.)?(?:github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/); return m && { owner: m[1].toLowerCase(), repo: m[2].toLowerCase() }; };
+const qnorm = (q) => String(q || '').trim().replace(/\s+/g, ' ').slice(0, 300);
+const qnum = (q) => -(parseInt(crypto.createHash('sha256').update(qnorm(q).toLowerCase()).digest('hex').slice(0, 7), 16) + 1);
+
+async function repoInfo(ctx, ref) {
+  const r = await gh(ctx.token, `repos/${ref.owner}/${ref.repo}`);
+  const c = await gh(ctx.token, `repos/${ref.owner}/${ref.repo}/commits/${encodeURIComponent(r.default_branch)}`);
+  return { name: r.full_name, description: r.description || '', branch: r.default_branch, sha: c.sha, url: r.html_url };
+}
+
+// ponytail: the whole default branch, capped at 200 MB compressed; fetch a subfolder only if big monorepos matter.
+const MAX_SNAPSHOT = 200 << 20;
+async function snapshot(token, ref, sha) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'readthrough-repo-'));
+  try {
+    const r = await fetch(`https://api.github.com/repos/${ref.owner}/${ref.repo}/tarball/${sha}`, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'user-agent': 'readthrough' },
+      signal: AbortSignal.timeout(5 * 60_000),
+    });
+    if (!r.ok) throw new Error(`GitHub answered ${r.status} for the repository's files.`);
+    const tar = spawn('tar', ['-xzf', '-', '-C', dir, '--strip-components=1'], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let err = '';
+    tar.stderr.on('data', (d) => { err += d; });
+    tar.stdin.on('error', () => {}); // tar exiting early surfaces through its exit code below
+    const exited = new Promise((ok, bad) => { tar.on('error', bad); tar.on('close', (code) => (code === 0 ? ok() : bad(new Error(`Couldn't unpack the repository: ${err.trim().slice(-200)}`)))); });
+    let n = 0;
+    for await (const chunk of r.body) {
+      n += chunk.length;
+      if (n > MAX_SNAPSHOT) { tar.kill(); throw new Error('This repository is over 200 MB compressed, too big to tour for now.'); }
+      if (!tar.stdin.write(chunk)) await new Promise((ok) => tar.stdin.once('drain', ok));
+    }
+    tar.stdin.end();
+    await exited;
+    // A symlink in someone's repository could point anywhere on this machine; drop them all before the model reads.
+    const unlink = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isSymbolicLink()) fs.unlinkSync(p); else if (e.isDirectory()) unlink(p); } };
+    unlink(dir);
+    return dir;
+  } catch (e) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+// The model's answer, pinned by path and real line numbers → a PR-shaped tour plus the "PR" whose hunks are the
+// excerpts it points at (unchanged lines, padded a little around points, merged where they touch).
+function repoTour(dir, raw, base) {
+  const root = fs.realpathSync(dir), text = new Map();
+  const linesOf = (p) => {
+    if (!text.has(p)) {
+      const abs = path.resolve(root, String(p || '').replace(/^\/+/, ''));
+      let t = null;
+      if (abs.startsWith(root + path.sep) && fs.existsSync(abs) && fs.statSync(abs).isFile()) { const b = fs.readFileSync(abs); if (!b.includes(0) && b.length < 2_000_000) t = b.toString('utf8').split('\n'); }
+      text.set(p, t);
+    }
+    return text.get(p);
+  };
+  const want = new Map();
+  const add = (p, a, b, pad = 0) => {
+    const L = linesOf(p);
+    if (!L || !(a > 0)) return;
+    const from = Math.max(1, a - pad), to = Math.min(L.length, Math.max(from, Math.min(b || a, a + 150)) + pad);
+    if (!want.has(p)) want.set(p, []);
+    want.get(p).push([from, to]);
+  };
+  raw.stops.forEach((st) => { st.excerpts.forEach((e) => add(e.path, e.from, e.to)); st.points.forEach((pt) => add(pt.path, pt.from, pt.to, 2)); });
+  raw.scenarios.forEach((sc) => sc.steps.forEach((st) => add(st.path, st.start, st.end, 2)));
+  raw.premortem.failures.forEach((f) => add(f.path, f.from, f.to, 2));
+  const files = [...want].map(([p, ranges], i) => {
+    const merged = [];
+    for (const [a, b] of ranges.sort((x, y) => x[0] - y[0])) { const last = merged.at(-1); if (last && a <= last[1] + 4) last[1] = Math.max(last[1], b); else merged.push([a, b]); }
+    const L = linesOf(p);
+    const hs = merged.map(([a, b], k) => ({ id: `f${i}h${k}`, at: '', start: a, add: 0, del: 0, lines: L.slice(a - 1, b).map((t, j) => [' ', a + j, a + j, t]) }));
+    return { i, path: p, prev: null, status: 'unchanged', add: 0, del: 0, generated: false, nodiff: false, anchor: '', hunks: paint(hs, langOf(p)) };
+  });
+  const byPath = new Map(files.map((f) => [f.path, f]));
+  const pinned = (p, a, b) => {
+    const h = byPath.get(p)?.hunks.find((x) => a >= x.start && a < x.start + x.lines.length);
+    return h ? { hunk: h.id, from: a - h.start + 1, to: Math.min(Math.max(a, b || a), h.start + h.lines.length - 1) - h.start + 1 } : { hunk: '', from: 0, to: 0 };
+  };
+  const within = (p, a, b) => (byPath.get(p)?.hunks || []).filter((h) => h.start <= (b || a) && h.start + h.lines.length - 1 >= a).map((h) => h.id);
+  const s = {
+    gist: raw.gist, goal: raw.goal, story: raw.story, why: raw.why, changes: [], questions: raw.questions || [],
+    flow: { nodes: raw.flow.nodes.map((n) => ({ ...n, status: n.status === 'core' ? 'changed' : 'context' })), edges: raw.flow.edges },
+    scenarios: raw.scenarios.map((sc) => ({ ...sc, steps: sc.steps.map(({ path: p, start, end, ...st }) => { const x = pinned(p, start, end); return { ...st, hunk: x.hunk, start: x.from, end: x.to }; }) })),
+    stops: raw.stops.map(({ excerpts, points, ...st }) => {
+      const pts = points.map(({ path: p, from, to, ...pt }) => ({ ...pt, ...pinned(p, from, to) }));
+      return { ...st, points: pts, hunks: [...new Set([...excerpts.flatMap((e) => within(e.path, e.from, e.to)), ...pts.map((pt) => pt.hunk)].filter(Boolean))] };
+    }),
+    chapters: raw.chapters,
+    premortem: { failures: raw.premortem.failures.map(({ path: p, from, to, ...f }) => ({ ...f, ...pinned(p, from, to) })), unknowns: raw.premortem.unknowns },
+  };
+  const pr = { ...base, files, add: 0, del: 0, commits: [], signals: [], issues: [], comments: [], body: '', since: null };
+  tidy(s, pr);
+  return { s, pr };
+}
+
+// What /api/pr returns for a codebase tour: the saved tour's "PR" (its excerpts), or a shell while it's being read.
+async function repoShell(ctx, ref) {
+  const info = await repoInfo(ctx, ref), cfg = await aiConfig(ctx.user);
+  const saved = (await db.getTour(ref, info.sha, readerOf(cfg))) || (await db.previousTour(ref, info.sha))?.data;
+  if (saved?.pr) return { ...saved.pr, toured: true, reading: null };
+  const busy = readingOf(ref, info.sha);
+  return {
+    kind: 'repo', ref, url: info.url, title: busy?.title || `How ${info.name} works`, author: ref.owner, state: 'repo', base: '', head: info.branch, sha: info.sha,
+    files: [], add: 0, del: 0, commits: [], signals: [], issues: [], comments: [], body: '', since: null, toured: false, reading: busy?.since || null,
+  };
+}
+
+async function repoStory(ctx, ref, question, fresh, onStep, aiKey) {
+  const info = await repoInfo(ctx, ref); // also the access check
+  const cfg = await aiConfig(ctx.user, aiKey), reader = readerOf(cfg), key = `${refKey(ref)}@${info.sha}#${reader}`;
+  await db.markOpened(ctx.user.id, ref);
+  const old = await db.previousTour(ref, info.sha);
+  if (!fresh) {
+    if (inflight.has(key)) return watch(inflight.get(key), onStep);
+    const hit = await db.getTour(ref, info.sha, reader);
+    if (hit) return hit;
+    const busy = readingOf(ref, info.sha);
+    if (busy) return watch(busy, onStep);
+    if (old) return old.data; // ponytail: a tour of an older commit stays good enough; Re-read brings it up to date
+  }
+  if (inflight.has(key)) return watch(inflight.get(key), onStep);
+  // The question isn't in the URL, only its hash: take it from the request, an earlier tour, or "none" for the whole repo.
+  const q = question != null ? qnorm(question) : old?.data.meta?.question ?? '';
+  if (qnum(q) !== ref.num) throw Object.assign(new Error('Start this tour again from the home page.'), { status: 400 });
+  const title = q || `How ${info.name} works`;
+  const entry = { since: Date.now(), key: refKey(ref), title, model: cfg.model || cfg.provider, by: ctx.user.id, step: '', listeners: new Set() };
+  const step = (t) => { entry.step = t; entry.listeners.forEach((f) => f(t)); };
+  const job = (async () => {
+    const t0 = Date.now();
+    step(`Downloading ${info.name}`);
+    const dir = await snapshot(ctx.token, ref, info.sha);
+    try {
+      step(`Exploring the code with ${nice(cfg.model || cfg.provider)}`);
+      const { s: raw, model } = await ai.exploreRepo(cfg, MODE === 'local', dir, { ...info, question: q }, step);
+      step('Pinning the tour to the code');
+      const base = { kind: 'repo', ref, url: info.url, title, author: ref.owner, state: 'repo', base: '', head: info.branch, sha: info.sha, question: q };
+      const { s, pr } = repoTour(dir, raw, base);
+      s.pr = pr;
+      s.meta = { sha: info.sha, provider: cfg.provider, model, ms: Date.now() - t0, at: new Date().toISOString(), ref, title, state: 'repo', kind: 'repo', question: q, from: null };
+      await db.putTour(ref, info.sha, reader, s, ctx.user.id);
+      return s;
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  })().finally(() => inflight.delete(key));
+  entry.job = job;
+  inflight.set(key, entry);
+  return watch(entry, onStep);
+}
+
 // Home page: this user's reads in progress, and the latest tour of each PR they've opened.
 const PER_PAGE = 6; // about one screen of tours in every home layout
 async function recent(ctx, params) {
@@ -652,9 +811,10 @@ async function handle(req, res) {
     const beat = setInterval(() => { if (!res.writableEnded) res.write(': still reading\n\n'); }, 15_000);
     req.on('close', () => clearInterval(beat));
     res.write('retry: 3000\n\n');
-    ev('progress', 'Fetching the pull request');
+    ev('progress', ref.num < 0 ? 'Fetching the repository' : 'Fetching the pull request');
     try {
-      const { anchors, ...s } = await story(ctx, ref, b.fresh === true, (t) => ev('progress', t), aiKey); // anchors stay on the server
+      const go = (t) => ev('progress', t), question = typeof b.question === 'string' ? b.question : null;
+      const { anchors, ...s } = ref.num < 0 ? await repoStory(ctx, ref, question, b.fresh === true, go, aiKey) : await story(ctx, ref, b.fresh === true, go, aiKey); // anchors stay on the server
       ev('done', s);
     } catch (e) {
       ev('failed', { error: e.message });
@@ -666,10 +826,18 @@ async function handle(req, res) {
   }
   if (req.method !== 'GET') return send(res, 405, { error: 'GET only' });
   if (u.pathname === '/api/inbox') return send(res, 200, await inbox(ctx));
+  // A codebase tour's key: the repository plus a number derived from the question. Also checks the repo can be read.
+  if (u.pathname === '/api/repo') {
+    const ref = parseRepo(u.searchParams.get('repo'));
+    if (!ref) return send(res, 400, { error: 'Expected a repository like github.com/owner/repo' });
+    const info = await repoInfo(ctx, ref);
+    return send(res, 200, { key: `${ref.owner}/${ref.repo}/${qnum(u.searchParams.get('q'))}`, name: info.name });
+  }
   if (u.pathname === '/api/recent') return send(res, 200, await recent(ctx, u.searchParams));
   if (u.pathname === '/api/pr') {
     const ref = parseRef(u.searchParams.get('pr'));
     if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
+    if (ref.num < 0) return send(res, 200, await repoShell(ctx, ref));
     const pr = await loadPR(ctx, ref);
     pr.reading = readingOf(ref, pr.sha)?.since || null; // so a page that comes back mid-read shows the real elapsed time
     pr.toured = (await db.toured([pr.sha])).has(`${ref.owner}/${ref.repo}/${ref.num}@${pr.sha}`); // so the page can say it is opening a saved tour, not reading
@@ -725,3 +893,23 @@ console.assert(TEST.test('src/foo.test.ts') && TEST.test('tests/a.py') && !TEST.
   console.assert(t[1].row === 1 && t[1].side === 'LEFT' && t[2].hunk === '', 'threads: old line pins, outdated stays');
 }
 console.assert(EMAIL.test('a.b+c@example.co.uk') && !EMAIL.test('a@b') && !EMAIL.test('a b@c.com') && !EMAIL.test('<x>@y.com') && !EMAIL.test('a@b..com'), 'waitlist email check');
+console.assert(parseRef('a/b/-12').num === -12 && parseRepo('https://github.com/A/B.git').repo === 'b' && parseRepo('a/b').owner === 'a' && !parseRepo('a/b/pull/1'), 'repo refs');
+console.assert(qnum('How does  login work?') === qnum('how does login work?') && qnum('x') < 0 && qnum('x') !== qnum('y'), 'question keys');
+{
+  // codebase tours: points pin to real lines inside padded, merged excerpts; unknown paths and lines drop their pin
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'readthrough-check-'));
+  fs.writeFileSync(path.join(dir, 'a.js'), Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n'));
+  const raw = {
+    gist: '', goal: '', story: '', why: '', questions: [], chapters: [{ title: 'c', summary: '', stops: [0] }],
+    flow: { nodes: [{ id: 'n', label: 'n', where: 'a.js', status: 'core', stop: 0, layer: 'logic', note: '' }], edges: [] },
+    scenarios: [{ title: 't', trigger: '', steps: [{ from: 'n', to: 'n', kind: 'call', what: '', data: '', path: 'a.js', start: 30, end: 31 }] }],
+    stops: [{ title: 's', summary: '', purpose: '', check: '', excerpts: [{ path: 'a.js', from: 10, to: 20 }], points: [{ text: '', why: '', path: 'a.js', from: 12, to: 13 }, { text: '', why: '', path: 'nope.js', from: 1, to: 2 }] }],
+    premortem: { failures: [], unknowns: [] },
+  };
+  const { s, pr } = repoTour(dir, raw, { kind: 'repo' });
+  fs.rmSync(dir, { recursive: true, force: true });
+  const h = pr.files[0].hunks;
+  console.assert(h.length === 2 && h[0].start === 10 && h[0].lines.length === 11 && h[1].start === 28, 'repo excerpts merge and pad');
+  console.assert(s.stops[0].points[0].hunk === 'f0h0' && s.stops[0].points[0].from === 3 && s.stops[0].points[1].hunk === '', 'repo points pin');
+  console.assert(s.scenarios[0].steps[0].hunk === 'f0h1' && s.flow.nodes[0].status === 'changed', 'repo steps and nodes');
+}

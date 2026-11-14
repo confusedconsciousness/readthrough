@@ -39,7 +39,7 @@
     const connect = async (again) => {
       try {
         const provider = (await cfgP?.catch(() => null))?.provider;
-        const r = await fetch('/api/story/stream', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pr: key, fresh: !!fresh && !again, key: store.get(`key:${provider}`, '') }) });
+        const r = await fetch('/api/story/stream', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pr: key, fresh: !!fresh && !again, key: store.get(`key:${provider}`, ''), question: questions.get(key) }) });
         if (!r.ok) return reject(new Error((await r.json().catch(() => ({}))).error || r.statusText));
         const rd = r.body.pipeThrough(new TextDecoderStream()).getReader();
         for (let buf = '', i; ;) {
@@ -77,7 +77,7 @@
     return m && `${m[1]}/${m[2]}/${m[3]}`;
   };
   const delta = (a, d) => `<span class="up">+${a}</span> <span class="down">−${d}</span>`;
-  const LETTER = { added: 'A', modified: 'M', removed: 'D', renamed: 'R', copied: 'C', changed: 'M' };
+  const LETTER = { added: 'A', modified: 'M', removed: 'D', renamed: 'R', copied: 'C', changed: 'M', unchanged: '·' };
 
   const index = (pr) => pr._ix || (pr._ix = new Map([...pr.files, ...(pr.since?.files || [])].flatMap((f) => f.hunks.map((h) => [h.id, { f, h }]))));
   const hasSince = (pr) => !!(pr?.since && (pr.since.rewritten || pr.since.commits.length));
@@ -93,6 +93,7 @@
     cur?.pr && index(cur.pr).has(id) ? `<a class="loc" data-hunk="${id}">${esc(loc(id))}</a>` : m);
 
   function unread(pr, s) {
+    if (pr.kind === 'repo') return { hunks: [], files: [] }; // a codebase tour shows excerpts, not a diff to cover
     const seen = new Set(s.stops.flatMap((st) => st.hunks));
     const live = pr.files.filter((f) => !f.generated);
     return {
@@ -104,7 +105,7 @@
   // ---------- routing ----------
 
   function parse() {
-    const m = location.hash.match(/^#\/([\w.-]+)\/([\w.-]+)\/(\d+)(?:\/(\w+))?/);
+    const m = location.hash.match(/^#\/([\w.-]+)\/([\w.-]+)\/(-?\d+)(?:\/(\w+))?/);
     if (!m) return null;
     return { key: `${m[1]}/${m[2]}/${m[3]}`, sel: !m[4] ? 'auto' : /^\d+$/.test(m[4]) ? +m[4] - 1 : m[4] };
   }
@@ -141,16 +142,17 @@
   // One entry per PR for this page's lifetime: leaving a PR mid-read and coming back joins the same read
   // instead of starting over. Re-read (fresh) starts a new entry. Failed requests are dropped so a retry refetches.
   const memo = new Map();
+  const questions = new Map(); // codebase tours started on this page: key → the question asked
 
   function open(key, sel = 'overview', fresh) {
     let m = memo.get(key);
     if (!m || fresh) memo.set(key, (m = { t0: Date.now() }));
     const c = cur = { key, pr: m.pr || null, story: m.story || null, err: null, serr: null, t0: m.t0, sel, step: m.step || '' };
     render();
-    m.prP ||= api(`/api/pr?pr=${key}`).then((pr) => { m.pr = pr; if (pr.reading && !m.story) m.t0 = pr.reading; return pr; });
+    m.prP ||= api(`/api/pr?pr=${key}`).then((pr) => { m.pr = m.story?.pr || pr; if (pr.reading && !m.story) m.t0 = pr.reading; return m.pr; });
     m.storyP ||= readStream(key, fresh, (t) => { m.step = t; if (c === cur) { c.step = t; stepUI(); } }).then((st) => (m.story = st));
     m.prP.then((pr) => { if (c === cur) { c.pr = pr; c.t0 = m.t0; render(); } }, (e) => { m.prP = null; if (c === cur) { c.err = e.message; render(); } });
-    m.storyP.then((st) => { if (c === cur) { c.story = st; render(); } else if (!cur) refreshRecent(); }, (e) => { m.storyP = null; if (c === cur) { c.serr = e.message; render(); } });
+    m.storyP.then((st) => { if (st.pr) m.pr = st.pr; if (c === cur) { c.story = st; if (st.pr) c.pr = st.pr; render(); } else if (!cur) refreshRecent(); }, (e) => { m.storyP = null; if (c === cur) { c.serr = e.message; render(); } });
   }
 
   // The reviewer: seven dimensions, each graded good / fair / poor (or unclear when the diff can't tell).
@@ -205,9 +207,9 @@
 
   // ---------- home ----------
 
-  const STATE = { merged: 'Merged', draft: 'Draft', closed: 'Closed', open: 'Open' };
+  const STATE = { merged: 'Merged', draft: 'Draft', closed: 'Closed', open: 'Open', repo: 'Codebase' };
   const REVIEW = { APPROVED: ['Approved', 'ok'], CHANGES_REQUESTED: ['Changes requested', 'bad'], REVIEW_REQUIRED: ['Needs review', ''] };
-  const keyLabel = (k) => esc(k.replace(/\/(\d+)$/, '')) + `<span class="num"> #${esc(k.split('/').pop())}</span>`;
+  const keyLabel = (k) => esc(k.replace(/\/(-?\d+)$/, '')) + (k.split('/').pop() < 0 ? '' : `<span class="num"> #${esc(k.split('/').pop())}</span>`);
 
   // GitHub-style diffstat: five blocks split between additions and deletions.
   function diffstat(a, d) {
@@ -224,6 +226,13 @@
     homeData = { r: null, inbox: null, err: '', q: '', page: 0 };
     view.innerHTML = `<div class="home2"><header class="h-head"><h1>Pull requests</h1>
       <form class="go h-search" autocomplete="off" role="search"><input name="pr" type="search" placeholder="Search tours and pull requests, or paste a PR link" aria-label="Search, or paste a pull request link" spellcheck="false"><kbd>/</kbd></form></header>
+      <form class="h-repo" autocomplete="off">
+        <p class="h-repo-t"><b>Tour a codebase</b><span class="muted">A guided read of a whole repository, or of the part you ask about.</span></p>
+        <div class="h-repo-f"><input name="repo" placeholder="owner/repo or a GitHub link" aria-label="Repository" spellcheck="false" required>
+        <input name="q" placeholder="What do you want to understand? Leave empty for the whole codebase" aria-label="Question" spellcheck="false">
+        <button class="btn primary">Tour it</button></div>
+        <p class="err" role="alert"></p>
+      </form>
       <div id="home2"></div></div>`;
     renderHome();
     refreshRecent();
@@ -306,8 +315,8 @@
         : `<div class="empty-state"><div class="bar-indef"></div></div>`;
       return;
     }
-    const state = { merged: 'Merged', draft: 'Draft', closed: 'Closed', open: 'Open' }[pr.state] || pr.state;
-    crumb.innerHTML = `<a class="repo" href="${esc(pr.url)}" target="_blank" rel="noopener">${esc(cur.key.replace(/\/(\d+)$/, ''))}<span class="num"> #${pr.ref.num}</span></a>
+    const state = STATE[pr.state] || pr.state;
+    crumb.innerHTML = `<a class="repo" href="${esc(pr.url)}" target="_blank" rel="noopener">${esc(cur.key.replace(/\/(-?\d+)$/, ''))}${pr.kind === 'repo' ? '' : `<span class="num"> #${pr.ref.num}</span>`}</a>
       <span class="ttl" title="${esc(pr.title)}">${esc(pr.title)}</span><span class="state s-${esc(pr.state)}">${state}</span>`;
     view.innerHTML = `<div class="app"><nav class="tour" aria-label="Tour">${tour()}</nav><section class="note" id="note"></section><section class="code" id="code"></section></div>`;
     show();
@@ -333,7 +342,7 @@
     const sinceRow = hasSince(pr) ? `<a class="row" data-sel="since">Since last tour<span class="c new">${pr.since.rewritten ? 'rebased' : `${pr.since.commits.length} new`}</span></a>` : '';
     if (!s) return `${sinceRow}<a class="row" data-sel="overview">Overview</a>
       ${serr ? `<p class="tour-msg bad">The tour couldn't be written.<br><button class="link" data-fresh>Try again</button></p>`
-        : `<p class="tour-msg"><span class="tm-step">${cur.step ? esc(cur.step) : pr.toured && !pr.reading ? 'Opening the saved tour' : `Reading ${plural(pr.files.length, 'file')}`}</span> · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></p><div class="bar-indef"></div>`}`;
+        : `<p class="tour-msg"><span class="tm-step">${cur.step ? esc(cur.step) : pr.toured && !pr.reading ? 'Opening the saved tour' : pr.kind === 'repo' ? 'Exploring the repository' : `Reading ${plural(pr.files.length, 'file')}`}</span> · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></p><div class="bar-indef"></div>`}`;
     const d = done(), ix = index(pr), u = unread(pr, s);
     const size = (st) => st.hunks.reduce((n, id) => n + (ix.get(id)?.h.add || 0) + (ix.get(id)?.h.del || 0), 0);
     const stopRows = depth() === 'glance'
@@ -345,7 +354,8 @@
       <p class="group">Check</p>
       ${hasIntent(s) ? `<a class="row" data-sel="intent">Does it do what was asked?<span class="c">${ic(VERDICT_IC[s.intent.verdict] || 'dot', VERDICT[s.intent.verdict]?.[1] || '')}${VERDICT[s.intent.verdict]?.[2] || ''}</span></a>` : ''}
       ${u.hunks.length || u.files.length ? `<a class="row" data-sel="unread">Unexplained<span class="c warn">${u.hunks.length + u.files.length}</span></a>` : ''}
-      ${s.review ? `<a class="row" data-sel="merge">Review<span class="c">${recIc(s.review.recommendation)}${REC[s.review.recommendation]?.[2] || ''}</span></a>`
+      ${pr.kind === 'repo' ? `<a class="row" data-sel="merge">Risks<span class="c">${s.premortem?.failures?.length || ''}</span></a>`
+        : s.review ? `<a class="row" data-sel="merge">Review<span class="c">${recIc(s.review.recommendation)}${REC[s.review.recommendation]?.[2] || ''}</span></a>`
         : `<a class="row" data-sel="merge">Before merging<span class="c">${s.checks?.length || ''}</span></a>`}`;
   }
 
@@ -383,7 +393,7 @@
     const d = done(), n = s.stops.length, u = unread(cur.pr, s);
     status.innerHTML = `<span class="segs" aria-hidden="true">${s.stops.map((_, i) => `<i class="${d.has(i) ? 'on' : ''}${cur.sel === i ? ' here' : ''}"></i>`).join('')}</span>
       <span><b>${d.size}</b>/${n} understood</span>
-      ${u.hunks.length ? `<span class="warn">${plural(u.hunks.length, 'hunk')} unexplained</span>` : '<span>Every hunk explained</span>'}
+      ${cur.pr.kind === 'repo' ? '' : u.hunks.length ? `<span class="warn">${plural(u.hunks.length, 'hunk')} unexplained</span>` : '<span>Every hunk explained</span>'}
       <span class="muted">Read by <button class="link quiet" data-settings title="Change who reads PRs">${esc(pretty(s.meta.model))}</button> in ${clock(s.meta.ms)}${s.meta.from ? ` · <span title="Only the commits after ${esc(s.meta.from.slice(0, 7))} were read; the rest of the tour carried over">updated from <code>${esc(s.meta.from.slice(0, 7))}</code></span>` : ''} · <button class="link${stale() ? ' strong' : ''}" data-fresh title="Read the whole PR again with ${esc(reader())}">${stale() ? `Re-read with ${esc(reader())}` : 'Re-read all'}</button></span>
       <span class="keys"><kbd>j</kbd><kbd>k</kbd> move <kbd>x</kbd> understood <kbd>/</kbd> open</span>`;
   }
@@ -392,12 +402,15 @@
     const { pr } = cur;
     return [`${heading(pr)}
       ${cur.serr ? `<div class="notice bad"><p>${prose(cur.serr)}</p><div class="row-end"><button class="btn" data-settings>Settings</button><button class="btn primary" data-fresh>Try again</button></div></div>`
+        : pr.kind === 'repo' ? '<p class="muted">Readthrough is reading the repository and following the code. This usually takes a few minutes.</p>'
         : `<p class="muted">The tour is being written. The diff is on the right in file order until then.</p>`}
-      ${facts(pr)}${desc(pr, true)}`,
+      ${pr.kind === 'repo' ? '' : facts(pr) + desc(pr, true)}`,
     pr.files.map((f) => fileHunks(pr, f)).join('')];
   }
 
   function heading(pr) {
+    if (pr.kind === 'repo') return `<h1 class="title">${esc(pr.title)}</h1>
+      <p class="byline"><code>${esc(pr.head)}</code> at <code>${esc(String(pr.sha).slice(0, 7))}</code>${pr.files.length ? ` · ${plural(pr.files.length, 'file')} shown` : ''}</p>`;
     return `<h1 class="title">${esc(pr.title)}</h1>
       <p class="byline">${esc(pr.author)} · <code>${esc(pr.head)}</code> → <code>${esc(pr.base)}</code><br>${plural(pr.files.length, 'file')} · ${delta(pr.add, pr.del)} · ${plural(pr.commits.length, 'commit')} · ${effortChip(effort(pr.add, pr.del, pr.files.length))}</p>`;
   }
@@ -416,7 +429,7 @@
       `${heading(pr)}
        ${hasSince(pr) ? `<a class="banner" data-sel="since"><b>${pr.since.rewritten ? 'Rebased' : plural(pr.since.commits.length, 'new commit')}</b> since the last tour${pr.since.at ? `, ${ago(pr.since.at)} ago` : ''}<span>See what changed →</span></a>` : ''}
        <p class="lead">${prose(s.gist)}</p>
-       ${s.goal ? `<p class="goal"><b>Goal.</b> ${prose(s.goal)}</p>` : ''}
+       ${s.goal ? `<p class="goal"><b>${pr.kind === 'repo' ? 'In short.' : 'Goal.'}</b> ${prose(s.goal)}</p>` : ''}
        ${s.story ? `<h2>How it fits together</h2><p class="story">${prose(s.story)}</p>` : ''}
        ${s.review ? `<a class="glance" data-sel="merge">
          <span class="glance-h">${recIc(s.review.recommendation)}<b>${REC[s.review.recommendation][0]}</b>${tally(s.review) ? `<span class="muted"> · ${tally(s.review)}</span>` : ''}<span class="glance-go">Open the review</span></span>
@@ -427,13 +440,25 @@
          ${old.length ? `<details class="desc"><summary>Comments on code that has changed (${old.length})</summary>${old.map((t) => `<p class="th-where"><code>${esc(t.path)}</code></p>${threadHTML(t)}`).join('')}</details>` : ''}`; })() : ''}
        ${D === 'glance' && risks.length ? `<h2>Top risks</h2><ol class="risks">${risks.map((f) => `<li><span class="sev ${f.severity}">${SEV[f.severity][0]}</span><span>${prose(f.text)}</span></li>`).join('')}</ol>
          <div class="actions"><button class="btn primary" data-depth="review">Walk the stops</button><button class="btn" data-sel="merge">Open the review</button></div>` : ''}
-       ${D === 'glance' ? '' : `<h2>Why</h2><p>${prose(s.why)}</p>
+       ${D === 'glance' ? '' : `<h2>${pr.kind === 'repo' ? 'Where to start' : 'Why'}</h2><p>${prose(s.why)}</p>
        ${s.changes.length ? `<h2>Behaviour</h2><table class="changes"><thead><tr><th>Before</th><th>After</th></tr></thead><tbody>${s.changes.map((c) => `<tr><td>${prose(c.before)}</td><td>${prose(c.after)}</td></tr>`).join('')}</tbody></table>` : ''}
-       ${facts(pr)}${desc(pr)}
+       ${pr.kind === 'repo' ? '' : facts(pr) + desc(pr)}
        <div class="actions"><button class="btn primary" data-sel="0">Start the tour <kbd>j</kbd></button></div>`}`,
       `${s.flow.nodes.length ? flowBlock(s) : ''}
-       <div class="block"><div class="block-head"><h2>Files</h2></div>${files(pr, s)}</div>`,
+       <div class="block"><div class="block-head"><h2>${pr.kind === 'repo' ? 'Files in the tour' : 'Files'}</h2></div>${files(pr, s)}</div>`,
     ];
+    if (sel === 'merge' && pr.kind === 'repo') {
+      const fails = (s.premortem?.failures || []).filter((f) => D === 'deep' || f.likelihood !== 'unlikely').map((f, i) => ({ ...f, k: i + 1 }));
+      return [
+        `<p class="kicker">Risks</p>
+         <h1 class="title">Will it hold up?</h1>
+         <p class="small muted">The code as it stands, imagined three months from now at ten times today's load: the most plausible ways it fails.</p>
+         ${fails.length ? `<ol class="points findings premortem">${fails.map(failureItem).join('')}</ol>` : '<p class="muted">Nothing stood out.</p>'}
+         ${s.premortem?.unknowns?.length ? `<p class="unknowns"><b>What the code can't show.</b> ${s.premortem.unknowns.map((x) => prose(x)).join(' ')}</p>` : ''}
+         ${s.questions.length ? `<h2>Questions for the team</h2><ul class="questions">${s.questions.map((q) => `<li>${prose(q)}</li>`).join('')}</ul>` : ''}`,
+        codeFor(pr, fails, []) || '<p class="code-empty">No risk is tied to a specific line.</p>',
+      ];
+    }
     if (sel === 'merge' && s.review && s.chapters?.length) {
       const r = s.review, home = stopOfHunk(s), keep = (f) => D === 'deep' || f.severity !== 'nit';
       const all = bySeverity(r.findings).filter(keep), ordered = [];
@@ -654,7 +679,7 @@
       return `<tr${cls ? ` class="${cls}"` : ''}${on.length ? ` data-pts="${on.map((m) => m.k).join(' ')}"` : ''}><td class="pg">${first ? `<span class="pb" data-pt="${first.k}">${first.k}</span>` : ''}</td><td class="ln">${o ?? ''}</td><td class="ln">${n ?? ''}</td><td class="sg">${s === ' ' ? '' : s === '-' ? '−' : '+'}</td><td class="tx">${colored(hl) ?? esc(t)}</td></tr>${th.has(i) ? commentRow(th.get(i), 4, long && i >= MAX) : ''}`;
     }).join('');
     return `<div class="hunk${marks.length ? ' marked' : ''}" id="h-${h.id}">
-      <div class="hh"><span class="st st-${L}" title="${esc(f.status)}">${L}</span><a class="p" href="${esc(h.id[0] === 'd' && pr.since ? pr.since.compare : `${pr.url}/files`)}#${f.anchor}" target="_blank" rel="noopener" title="Open on GitHub">${pathHtml(f.path)}</a><span class="at">${h.at ? esc(h.at) : `line ${h.start}`}</span>${nth ? `<span class="cm-n" title="${plural(nth, 'comment thread')} on these lines">${ic('discuss', 'muted')}${nth}</span>` : ''}<span class="n">${delta(h.add, h.del)}</span></div>
+      <div class="hh"><span class="st st-${L}" title="${esc(f.status)}">${L}</span><a class="p" href="${esc(pr.kind === 'repo' ? `${pr.url}/blob/${pr.sha}/${f.path}#L${h.start}-L${h.start + h.lines.length - 1}` : `${h.id[0] === 'd' && pr.since ? pr.since.compare : `${pr.url}/files`}#${f.anchor}`)}" target="_blank" rel="noopener" title="Open on GitHub">${pathHtml(f.path)}</a><span class="at">${h.at ? esc(h.at) : `line ${h.start}`}</span>${nth ? `<span class="cm-n" title="${plural(nth, 'comment thread')} on these lines">${ic('discuss', 'muted')}${nth}</span>` : ''}<span class="n">${delta(h.add, h.del)}</span></div>
       <div class="scroll"><table class="diff${split ? ' split' : ''}">${split ? '<colgroup><col class="c-pg"><col class="c-ln"><col class="c-sg"><col><col class="c-ln"><col class="c-sg"><col></colgroup>' : ''}<tbody>${rows}</tbody></table></div>
       ${long ? `<button class="expand" data-expand>${h.lines.length - MAX} more lines</button>` : ''}
     </div>`;
@@ -802,7 +827,7 @@
     return `<div class="block flowblock">
       <div class="block-head"><h2>How it works</h2>
         ${sc.length ? `<span class="seg-btns">${[['map', 'Map'], ['seq', 'Sequence']].map(([v, l]) => `<button data-view="${v}" class="${play.view === v ? 'on' : ''}" aria-pressed="${play.view === v}">${l}</button>`).join('')}</span>` : ''}
-        <p class="legend"><span class="lg a">A</span>added <span class="lg m">M</span>modified <span class="lg d">D</span>deleted <span class="lg c"></span>unchanged</p></div>
+        <p class="legend">${cur.pr?.kind === 'repo' ? '<span class="lg m"></span>core <span class="lg c"></span>context' : '<span class="lg a">A</span>added <span class="lg m">M</span>modified <span class="lg d">D</span>deleted <span class="lg c"></span>unchanged'}</p></div>
       ${sc.length ? `<div class="scn-tabs" role="tablist" aria-label="Runtime walkthroughs">${sc.map((x, k) => `<button role="tab" data-scn="${k}" class="${k === play.sc ? 'on' : ''}" aria-selected="${k === play.sc}">${esc(x.title)}</button>`).join('')}</div>` : ''}
       <div class="map-wrap"><div class="map" id="flowview"></div>${s.flow.nodes.some((n) => n.note) ? '<div class="node-card" id="node-card" aria-live="polite"></div>' : ''}</div>
       ${sc.length ? '<div class="player" id="player"></div>' : '<p class="small muted nosc">Re-read this PR to get step-by-step walkthroughs of what happens at runtime.</p>'}
@@ -1158,6 +1183,22 @@
   // ---------- events ----------
 
   // The landing's waitlist form: one address, then a thank-you in place of the form.
+  // Tour a codebase: the server turns the repository and question into a tour key, then the PR view takes over.
+  document.addEventListener('submit', async (e) => {
+    if (!e.target.matches('.h-repo')) return;
+    e.preventDefault();
+    const f = e.target, err = $('.err', f), btn = $('button', f), q = f.elements.q.value.trim();
+    err.textContent = '';
+    btn.disabled = true;
+    try {
+      const r = await api(`/api/repo?repo=${encodeURIComponent(f.elements.repo.value.trim())}&q=${encodeURIComponent(q)}`);
+      questions.set(r.key, q);
+      location.hash = `#/${r.key}`;
+    } catch (x) {
+      err.textContent = x.message;
+      btn.disabled = false;
+    }
+  });
   document.addEventListener('submit', async (e) => {
     if (!e.target.matches('.l-wait')) return;
     e.preventDefault();
@@ -1261,7 +1302,7 @@
     if (!g || !card || !cur?.story) return;
     const n = cur.story.flow.nodes[+g.dataset.node];
     if (!n) return;
-    card.innerHTML = `<b>${esc(n.label)}</b><span class="nc-st">${STATUS_WORD[n.status] || ''}</span><code>${esc(n.where)}</code>${n.note ? `<p>${prose(n.note)}</p>` : ''}${g.dataset.sel ? `<span class="nc-go">Click to open stop ${+g.dataset.sel + 1}</span>` : ''}`;
+    card.innerHTML = `<b>${esc(n.label)}</b><span class="nc-st">${cur?.pr?.kind === 'repo' ? (n.status === 'changed' ? 'Core' : 'Context') : STATUS_WORD[n.status] || ''}</span><code>${esc(n.where)}</code>${n.note ? `<p>${prose(n.note)}</p>` : ''}${g.dataset.sel ? `<span class="nc-go">Click to open stop ${+g.dataset.sel + 1}</span>` : ''}`;
     card.classList.add('on');
   };
   document.addEventListener('mouseout', (e) => { if (e.target.closest?.('.map .node') && !e.relatedTarget?.closest?.('.map .node')) $('#node-card')?.classList.remove('on'); });

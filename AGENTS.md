@@ -84,6 +84,15 @@ Then add `DATABASE_URL=postgres://readthrough:readthrough@127.0.0.1:5433/readthr
 5. `tidy()` pins every point, finding and premortem item to real diff lines, and normalises chapters. `anchorsOf()` records the hunk text for the next incremental read. The tour is saved with `db.putTour`.
 6. The stream sends `progress` steps, a `: still reading` comment every 15 seconds (so proxies don't time out), and finally `done` (the tour without `anchors`) or `failed`.
 
+### A codebase tour
+
+A tour of a repository rides on the same machinery. Its key is `owner/repo/<negative number>`, the number being a hash of the question (`qnum` in `server.js`; `/api/repo` turns a repository and question into the key).
+
+1. `repoStory()` fetches the default branch's commit and downloads GitHub's tarball into a temporary folder (`snapshot()`), removing symlinks.
+2. `ai.exploreRepo` has the model explore it. Claude Code and Codex use their own read-only tools inside the folder. The Anthropic API runs a manual loop with `list_dir`, `read_file` and `search` (`repoTools`, confined to the folder) and finishes with a strict `submit_tour` tool whose input is `REPO_SCHEMA`.
+3. `repoTour()` turns the file paths and line numbers the model points at into hunks of unchanged lines (padded, merged), pins every point, step and risk to them, and runs `tidy()`. The resulting "PR" is stored with the tour as `s.pr`, and the front end draws it with the PR views wherever `pr.kind === 'repo'`.
+4. The folder is deleted when the read ends.
+
 ### Files
 
 | File | What's in it |
