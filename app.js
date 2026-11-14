@@ -227,11 +227,15 @@
     view.innerHTML = `<div class="home2"><header class="h-head"><h1>Pull requests</h1>
       <form class="go h-search" autocomplete="off" role="search"><input name="pr" type="search" placeholder="Search tours and pull requests, or paste a PR link" aria-label="Search, or paste a pull request link" spellcheck="false"><kbd>/</kbd></form></header>
       <form class="h-repo" autocomplete="off">
-        <p class="h-repo-t"><b>Tour a codebase</b><span class="muted">A guided read of a whole repository, or of the part you ask about.</span></p>
-        <div class="h-repo-f"><input name="repo" placeholder="owner/repo or a GitHub link" aria-label="Repository" spellcheck="false" required>
-        <input name="q" placeholder="What do you want to understand? Leave empty for the whole codebase" aria-label="Question" spellcheck="false">
-        <button class="btn primary">Tour it</button></div>
+        <p class="h-repo-t"><b>Tour a codebase</b><span class="muted">A guided read of a whole repository, or of the part you ask about. Takes a few minutes.</span></p>
+        <div class="h-repo-f">
+          <label><span>Repository</span><input name="repo" list="repo-list" placeholder="owner/repo or a GitHub link" spellcheck="false" required></label>
+          <label><span>Question <span class="muted">· optional</span></span><input name="q" placeholder="Leave empty to tour the whole codebase" spellcheck="false"></label>
+          <button class="btn primary">Start tour</button>
+        </div>
+        <p class="h-repo-ex"><span class="muted">Try</span>${['How is the code organised?', 'How does a request flow through it?', 'Where is data stored?'].map((q) => `<button type="button" data-ask="${q}">${q}</button>`).join('')}</p>
         <p class="err" role="alert"></p>
+        <datalist id="repo-list"></datalist>
       </form>
       <div id="home2"></div></div>`;
     renderHome();
@@ -271,6 +275,8 @@
   function renderHome() {
     const box = $('#home2');
     if (!box) return;
+    const list = $('#repo-list'), repos = [...new Set([...(homeData.inbox?.review || []), ...(homeData.inbox?.mine || [])].map((x) => x.repo).concat((homeData.r?.tours || []).map((t) => t.key.replace(/\/-?\d+$/, ''))))];
+    if (list) list.innerHTML = repos.map((r) => `<option value="${esc(r)}">`).join('');
     const { r, inbox, err } = homeData;
     const q = homeData.q.trim().toLowerCase(), hit = (x) => !q || `${x.repo} #${x.num} ${x.title} ${x.author}`.toLowerCase().includes(q);
     const tours = r?.tours || [], reading = r?.reading || [], review = (inbox?.review || []).filter(hit), mine = (inbox?.mine || []).filter((x) => !x.tour && hit(x));
@@ -1243,6 +1249,8 @@
   });
 
   document.addEventListener('click', (e) => {
+    const ask = e.target.closest('[data-ask]');
+    if (ask) { const q = ask.form.elements.q; q.value = ask.dataset.ask; q.focus(); return; }
     if (e.target.closest?.('[data-menu]')) e.target.closest?.('details')?.removeAttribute('open');
     if (e.target.closest?.('[data-signout]')) return signOut();
     const jump = e.target.closest?.('[data-jump]');
