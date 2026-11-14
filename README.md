@@ -249,3 +249,12 @@ npm run check
 - A tour stays on someone's home page after they lose access to its repository.
 - Generated files are detected by file name.
 - A codebase tour sees only the default branch, and only what the AI chose to open within its budget of about 40 files. A broad question on a big repository gives a shallow tour; ask about one part instead.
+
+## License
+
+Readthrough is source-available under the [Functional Source License, version 1.1, with Apache 2.0 as the future license](LICENSE.md) (FSL-1.1-ALv2).
+
+- You may read, run, change and share the code for any purpose except a competing use: offering it, or something substantially like it, to others as a commercial product or service.
+- Running it for yourself or inside your company, learning from it, research, and contributing back are all fine.
+- Two years after each version is published, that version is also available under the Apache License 2.0, with no competing-use limit.
+- The license doesn't let you use the Readthrough name or logo, beyond saying where the code came from.

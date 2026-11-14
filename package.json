@@ -2,6 +2,7 @@
   "name": "readthrough",
   "private": true,
   "description": "A guided review of GitHub pull requests.",
+  "license": "FSL-1.1-ALv2",
   "type": "commonjs",
   "engines": {
     "node": ">=22.13"
