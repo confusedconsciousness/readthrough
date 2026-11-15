@@ -14,8 +14,9 @@ Open a PR and Readthrough shows it in three panes: the list of stops, the explan
 - **Unexplained:** any hunk no stop covers. Readthrough computes this itself, without AI, so nothing in the diff is skipped quietly.
 - **Review:** Readthrough also reviews the PR like a sceptical senior engineer. It gives a recommendation (approve, approve with nits, request changes, or discuss first) with an opening paragraph you could post, and a scorecard of seven dimensions, each graded Good, Fair, Poor or Unclear with a one-line reason: **necessity, correctness, bugs, error handling, duplication, cognitive load, tests**. Below it are numbered findings, each with a severity (blocker, major, minor, nit), what goes wrong, a suggested fix, and the exact lines in the code gutter. A blocker always means "request changes". **Possibly unnecessary** lists the parts of the PR its goal doesn't need, and questions for the author close the review. Grades come from the diff, description and linked issues, not the whole repository, so treat them as a second reviewer's notes.
 - **From the file list:** facts from file names alone: no test changes, dependency, migration, CI or config changes, deleted files, generated files skipped.
+- **Compare AIs:** each AI keeps its own tour of a commit. Pick another in Settings and press Re-read, and the status bar's **Read by** menu switches between the tours to compare which explains it better.
 
-**Codebase tours.** On the home page, **Tour a codebase** takes a repository and, optionally, a question ("How does login work?"). Readthrough downloads a snapshot of the default branch, lets the AI explore it with read-only tools (list folders, read files, search), and writes the same kind of tour: the overview with where to start, the map and walkthroughs, stops through the real code in reading order, and the risks. Leave the question empty for a tour of the whole system. A tour of an older commit keeps being shown until you press Re-read. Works with Claude Code, Codex and the Anthropic API, not yet with OpenAI-compatible APIs; repositories over 200 MB compressed are refused.
+**Codebase tours.** On the home page, **Tour a codebase** takes a repository and, optionally, a question ("How does login work?"). Readthrough downloads a snapshot of the default branch, lets the AI explore it with read-only tools (list folders, read files, search), and writes the same kind of tour: the overview with where to start, the map and walkthroughs, stops through the real code in reading order, and the risks. Leave the question empty for a tour of the whole system. A tour of an older commit keeps being shown until you press Re-read. Works with Claude Code, Codex and the Anthropic API, not yet with OpenAI-compatible APIs, Ollama or LM Studio; repositories over 200 MB compressed are refused.
 
 The home page shows reads in progress, your tours (each with its map, gist and how many stops you've marked understood), and your open PRs and review requests with size, review state, a 1–5 effort score (from size, no AI) and whether a tour is ready.
 
@@ -41,6 +42,7 @@ This is the quickest way in and needs no accounts beyond GitHub and an AI. Readt
 | &nbsp;&nbsp;Claude Code, signed in | uses your Claude plan | `claude --version`, then `claude auth status` |
 | &nbsp;&nbsp;Codex, signed in | uses your ChatGPT plan | `codex --version`, then `codex login status` |
 | &nbsp;&nbsp;an Anthropic or OpenAI-compatible API key | billed to that account | you paste it in Settings later |
+| &nbsp;&nbsp;a local model in Ollama or LM Studio | free, and the PR stays on your machine | `ollama list`, or `lms ls` |
 
 On macOS with Homebrew: `brew install node gh`. Elsewhere: [nodejs.org](https://nodejs.org) and [cli.github.com](https://cli.github.com). Claude Code: see [its install guide](https://docs.claude.com/en/docs/claude-code/setup).
 
@@ -88,8 +90,10 @@ The gear button opens **Settings**. Locally the default is Claude Code with Sonn
 | Codex | `codex` signed in | your Codex default model, or name one |
 | Anthropic API | an API key | same three models |
 | OpenAI-compatible API | a base URL, a model id and a key | OpenAI, OpenRouter, or anything that supports JSON-schema output |
+| Ollama | Ollama running (`ollama serve`) and a model you pulled | uses Ollama's own API at `OLLAMA_HOST`; Readthrough sizes the context window to the PR |
+| LM Studio | LM Studio's server running (`lms server start`) and a model you downloaded | also serves the models of LM Studio Bionic, which has no API of its own. Port 1234; load the model with enough context for big PRs (`lms load <model> --context-length 32768`) |
 
-A provider whose CLI isn't installed is greyed out. API keys stay in your browser and go to the server only with each read; locally you can also put `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in `.env`.
+Ollama and LM Studio are only offered locally. Small local models often can't fill in a whole tour; one around 30B parameters or larger works best. A provider whose CLI isn't installed is greyed out. API keys stay in your browser and go to the server only with each read; locally you can also put `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in `.env`.
 
 ### If something goes wrong
 
@@ -115,6 +119,7 @@ Copy `.env.example` to `.env`; `npm start` reads it. Locally you need none of it
 | `READTHROUGH_SQLITE` | where the SQLite file lives | `./readthrough.db` |
 | `READTHROUGH_EFFORT` | how hard Claude thinks per read: `low` to `max` | `high` |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | a key for local mode, so you needn't paste one | unset |
+| `OLLAMA_HOST` | where Ollama listens (Ollama's own variable) | `http://127.0.0.1:11434` |
 | `GITHUB_CLIENT_ID` | **switches on hosted mode** (GitHub sign-in) | unset (local mode) |
 | `GITHUB_CLIENT_SECRET` | hosted: the GitHub App's client secret | required when hosted |
 | `GITHUB_APP_SLUG` | hosted: makes the "Choose repositories" link | unset |

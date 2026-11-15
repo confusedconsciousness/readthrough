@@ -106,6 +106,7 @@ body[data-view="home"] .top .go { visibility: hidden; }
 .status { display: flex; align-items: center; gap: 16px; height: 26px; padding: 0 14px; border-top: 1px solid var(--line); background: var(--bg-2); font-size: 12px; color: var(--fg-2); white-space: nowrap; overflow: hidden; }
 .status:empty { display: none; }
 .status b { color: var(--fg); font-variant-numeric: tabular-nums; }
+.reader-pick { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line-2); border-radius: 4px; height: 20px; padding: 0 2px; }
 .segs { display: flex; gap: 2px; }
 .segs i { width: 10px; height: 8px; border-radius: 1px; background: var(--line-2); }
 .segs i.on { background: var(--green); }

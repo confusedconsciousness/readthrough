@@ -208,7 +208,11 @@ const PROVIDERS = {
   openai: { label: 'OpenAI-compatible API', key: true, hosted: true, models: null },
   claude: { label: 'Claude Code', key: false, hosted: false, models: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5'] },
   codex: { label: 'Codex', key: false, hosted: false, models: null },
+  ollama: { label: 'Ollama', key: false, hosted: false, models: null },
+  lmstudio: { label: 'LM Studio', key: false, hosted: false, models: null },
 };
+// Ollama's own variable, so `ollama serve` and Readthrough agree on where it listens.
+const OLLAMA = (process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/^(?!https?:\/\/)/, 'http://').replace(/\/+$/, '');
 // Models that accept server-side refusal fallbacks; on these a policy decline is retried on a fallback model.
 const FALLBACKS = new Set(['claude-opus-5-5', 'claude-sonnet-5-5']);
 
@@ -268,6 +272,93 @@ async function viaOpenAI(cfg, input, system, schema) {
   return { s: JSON.parse(text), model: j.model || cfg.model };
 }
 
+// Local servers stream their answers: a local model can take many minutes, and Node's fetch gives up on a response
+// whose headers take more than five. lines() yields a streamed body line by line.
+async function* lines(body) {
+  const dec = new TextDecoder();
+  let buf = '';
+  for await (const chunk of body) {
+    buf += dec.decode(chunk, { stream: true });
+    const ls = buf.split('\n');
+    buf = ls.pop();
+    yield* ls.filter((l) => l.trim());
+  }
+  if (buf.trim()) yield buf;
+}
+const localFail = (name, url, start) => (e) => {
+  if (e.message?.startsWith(name)) return e;
+  if (e.name === 'TimeoutError') return new Error(`${name} took more than 30 minutes. Try a smaller model or a smaller PR.`);
+  if (e.cause?.code === 'UND_ERR_HEADERS_TIMEOUT') return new Error(`${name} took more than five minutes to start answering. Try a smaller model or a smaller PR.`);
+  if (e instanceof SyntaxError) return new Error(`${name} sent an answer Readthrough couldn't read.`);
+  return new Error(`Couldn't reach ${name} at ${url}. Start it with \`${start}\`.`);
+};
+const notTour = (model) => new Error(`${model} didn't return a complete tour. Small models often can't; try a larger one.`);
+
+// Ollama's native /api/chat. The schema goes in `format`, which Ollama enforces while it generates.
+async function viaOllama(cfg, input, system, schema) {
+  const fail = localFail('Ollama', OLLAMA, 'ollama serve');
+  const r = await fetch(`${OLLAMA}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: cfg.model, stream: true, format: schema,
+      messages: [{ role: 'system', content: system }, { role: 'user', content: input }],
+      // Ollama's default window is a few thousand tokens and it drops the overflow silently. ponytail: ~3 chars a
+      // token plus room for the tour; count real tokens if this misjudges.
+      options: { num_ctx: Math.min(131072, Math.ceil((system.length + input.length) / 3) + 16384) },
+    }),
+    signal: AbortSignal.timeout(30 * 60_000),
+  }).catch((e) => { throw fail(e); });
+  if (!r.ok) {
+    const err = (await r.json().catch(() => ({}))).error || `it answered ${r.status}`;
+    throw new Error(r.status === 404 ? `Ollama doesn't have ${cfg.model}. Run \`ollama pull ${cfg.model}\`, or pick a model you have.` : `Ollama: ${err}`);
+  }
+  let text = '', model = cfg.model;
+  try {
+    for await (const line of lines(r.body)) {
+      const j = JSON.parse(line);
+      if (j.error) throw new Error(`Ollama: ${j.error}`);
+      text += j.message?.content || '';
+      if (j.done) model = j.model || model;
+    }
+  } catch (e) { throw fail(e); }
+  try { return { s: JSON.parse(text), model }; } catch { throw notTour(cfg.model); }
+}
+
+// LM Studio's local server (also the runtime behind LM Studio Bionic), through its OpenAI-compatible endpoint.
+// ponytail: fixed at LM Studio's default port; someone on another port can use the OpenAI-compatible provider.
+const LMSTUDIO = 'http://127.0.0.1:1234';
+async function viaLMStudio(cfg, input, system, schema) {
+  const fail = localFail('LM Studio', LMSTUDIO, 'lms server start');
+  const r = await fetch(`${LMSTUDIO}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: cfg.model, stream: true,
+      messages: [{ role: 'system', content: system }, { role: 'user', content: input }],
+      response_format: { type: 'json_schema', json_schema: { name: 'tour', strict: true, schema } },
+    }),
+    signal: AbortSignal.timeout(30 * 60_000),
+  }).catch((e) => { throw fail(e); });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(`LM Studio: ${j.error?.message || j.error || `it answered ${r.status}`}`);
+  }
+  let text = '', model = cfg.model;
+  try {
+    for await (const line of lines(r.body)) {
+      if (!line.startsWith('data:')) continue;
+      const d = line.slice(5).trim();
+      if (d === '[DONE]') break;
+      const j = JSON.parse(d);
+      if (j.error) throw new Error(`LM Studio: ${j.error.message || j.error}`);
+      text += j.choices?.[0]?.delta?.content || '';
+      model = j.model || model;
+    }
+  } catch (e) { throw fail(e); }
+  try { return { s: JSON.parse(text), model }; } catch { throw notTour(cfg.model); }
+}
+
 async function viaClaudeCode(cfg, input, system, schema) {
   // Run from the temp dir with no settings, tools or session so nothing but the PR shapes the answer.
   const out = JSON.parse(await run('claude', [
@@ -301,7 +392,7 @@ async function ask(cfg, local, input, system, schema) {
   const p = PROVIDERS[cfg.provider];
   if (!p || (!p.hosted && !local)) throw new Error('Pick an AI in Settings before reading a PR.');
   if (p.key && !cfg.key) throw new Error(`Add your ${p.label} key in Settings to read PRs.`);
-  return { anthropic: viaAnthropic, openai: viaOpenAI, claude: viaClaudeCode, codex: viaCodex }[cfg.provider](cfg, input, system, schema);
+  return { anthropic: viaAnthropic, openai: viaOpenAI, claude: viaClaudeCode, codex: viaCodex, ollama: viaOllama, lmstudio: viaLMStudio }[cfg.provider](cfg, input, system, schema);
 }
 const analyse = (pr, cfg, { local }) => ask(cfg, local, prompt(pr), SYSTEM, SCHEMA);
 const update = (pr, old, open, uncovered, cfg, { local }) => ask(cfg, local, updatePrompt(pr, old, open, uncovered), UPDATE, UPDATE_SCHEMA);
@@ -518,7 +609,7 @@ async function exploreRepo(cfg, local, dir, meta, onStep) {
   const p = PROVIDERS[cfg.provider];
   if (!p || (!p.hosted && !local)) throw new Error('Pick an AI in Settings before reading a repository.');
   if (p.key && !cfg.key) throw new Error(`Add your ${p.label} key in Settings to read repositories.`);
-  if (cfg.provider === 'openai') throw new Error('Codebase tours work with the Anthropic API, Claude Code or Codex for now. Pick one in Settings.');
+  if (['openai', 'ollama', 'lmstudio'].includes(cfg.provider)) throw new Error('Codebase tours work with the Anthropic API, Claude Code or Codex for now. Pick one in Settings.');
   return { anthropic: exploreAnthropic, claude: exploreClaudeCode, codex: exploreCodex }[cfg.provider](cfg, dir, meta, onStep);
 }
 

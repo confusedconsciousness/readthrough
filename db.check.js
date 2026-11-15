@@ -43,6 +43,12 @@ async function check(label, opts) {
   assert.equal((await db.getTour(ref, 'sha2', 'claude-opus')).gist, 'two');
   assert.equal((await db.getTour(ref, 'sha2', 'someone-else')).gist, 'two'); // falls back to any reader of that commit
   assert.equal(await db.getTour(ref, 'sha3', 'claude-opus'), null);
+  assert.equal(await db.getTour(ref, 'sha2', 'someone-else', true), null); // exact: only that reader's tour
+  await db.putTour(ref, 'sha2', 'codex-default', { gist: 'three', meta: { provider: 'codex', model: 'gpt-6', at: '2026-01-03T00:00:00.000Z' } }, u.id);
+  assert.deepEqual((await db.readers(ref, 'sha2')).map((r) => ({ ...r })), [
+    { reader: 'claude-opus', provider: null, model: null, at: '2026-01-02T00:00:00.000Z' },
+    { reader: 'codex-default', provider: 'codex', model: 'gpt-6', at: '2026-01-03T00:00:00.000Z' },
+  ]);
   const prev = await db.previousTour(ref, 'sha2');
   assert.equal(prev.sha, 'sha1'); assert.equal(prev.at, '2026-01-01T00:00:00.000Z'); assert.equal(prev.data.gist, 'one');
   assert.deepEqual([...(await db.toured(['sha1', 'zzz']))].filter((k) => k.includes(`r${gid}/`)), [`o/r${gid}/7@sha1`]); // other runs' rows may share the sha

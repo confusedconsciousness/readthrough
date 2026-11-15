@@ -23,9 +23,10 @@ Don't repeat anything personal a check prints (email addresses, organisation nam
 6. **An AI.** One working option is enough. Check what's there:
    - **Claude Code:** `claude --version`, then `claude auth status` and read only its `loggedIn` field. If it's false, ask the person to run `claude auth login` **(person)**.
    - **Codex:** `codex --version`, then `codex login status`. If it isn't logged in, ask the person to run `codex login` **(person)**.
+   - **A local model:** `curl -s localhost:11434/api/tags` lists Ollama's models; `curl -s localhost:1234/v1/models` lists LM Studio's (which also serves LM Studio Bionic's). Only if the person wants one.
    - **Neither:** once the app is up, the person pastes an Anthropic or OpenAI-compatible API key in Settings (the gear button). Don't handle the key for them.
 
-   The app starts on Claude Code with Sonnet 5.5. If only Codex or a key works, tell the person to choose it in Settings before the first read.
+   The app starts on Claude Code with Sonnet 5.5. If only Codex, a local model or a key works, tell the person to choose it in Settings before the first read.
 7. **Start it.** Pick the port: 4400 unless it's taken. Check with `lsof -iTCP:4400 -sTCP:LISTEN`, which prints nothing when the port is free. If it's taken, `curl -s http://localhost:4400/api/me` tells you whether it's a Readthrough (it answers with `"mode"`); ask the person whether to stop it. Otherwise use 4401. Below, `PORT` means the port you picked.
    - **In Claude Code,** on 4400 only: start the preview server `readthrough` from `.claude/launch.json`.
    - **Anywhere else, or on another port:** `PORT=4401 npm start > readthrough.log 2>&1 &` (with your port). `readthrough.log` is gitignored.
@@ -69,7 +70,7 @@ Then add `DATABASE_URL=postgres://readthrough:readthrough@127.0.0.1:5433/readthr
 
 `MODE` in `server.js` is `hosted` when `GITHUB_CLIENT_ID` is set, otherwise `local`.
 
-- **Local:** no sign-in. GitHub calls use the token from `gh auth token`. Claude Code and Codex are allowed as AIs. It binds 127.0.0.1.
+- **Local:** no sign-in. GitHub calls use the token from `gh auth token`. Claude Code, Codex, Ollama and LM Studio are allowed as AIs. It binds 127.0.0.1.
 - **Hosted:** sign-in through a GitHub App, an allowlist and waitlist, sessions in the database, only API-key AIs. It binds 0.0.0.0 behind HTTPS.
 
 ### A read, end to end
@@ -98,7 +99,7 @@ A tour of a repository rides on the same machinery. Its key is `owner/repo/<nega
 | File | What's in it |
 |---|---|
 | `server.js` | Config; PR loading and diff parsing (`loadPR`, `threadsOf` for review comments); AI settings (`aiConfig`, `saveSettings`); tours (`story`, `tidy`, `carry`, `recent`); sessions and sign-in (`context`, `signIn`, the allowlist); the HTTP router (`handle`); the waitlist; self-checks at the end. |
-| `ai.js` | `SYSTEM` and `SCHEMA` for a full read, `UPDATE` and `UPDATE_SCHEMA` for new commits, and the providers (`viaAnthropic`, `viaOpenAI`, `viaClaudeCode`, `viaCodex`). |
+| `ai.js` | `SYSTEM` and `SCHEMA` for a full read, `UPDATE` and `UPDATE_SCHEMA` for new commits, and the providers (`viaAnthropic`, `viaOpenAI`, `viaOllama`, `viaLMStudio`, `viaClaudeCode`, `viaCodex`). |
 | `db.js` | `PG_SCHEMA` and `LITE_SCHEMA`, one set of queries written to run on both, and the sealing of GitHub tokens. |
 | `github.js` | REST and GraphQL with a per-person token; GitHub App OAuth; `localToken()` from `gh`. |
 | `app.js` | One IIFE, in sections marked `// ---------- name ----------`: state, helpers, routing, home, PR, flow map, flow player, settings, account, landing, events, appearance, self-checks. |

@@ -39,7 +39,7 @@
     const connect = async (again) => {
       try {
         const provider = (await cfgP?.catch(() => null))?.provider;
-        const r = await fetch('/api/story/stream', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pr: key, fresh: !!fresh && !again, key: store.get(`key:${provider}`, ''), question: questions.get(key) }) });
+        const r = await fetch('/api/story/stream', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pr: key, fresh: !!fresh && !again, key: store.get(`key:${provider}`, ''), question: questions.get(key), reader: picks.get(key) }) });
         if (!r.ok) return reject(new Error((await r.json().catch(() => ({}))).error || r.statusText));
         const rd = r.body.pipeThrough(new TextDecoderStream()).getReader();
         for (let buf = '', i; ;) {
@@ -143,8 +143,10 @@
   // instead of starting over. Re-read (fresh) starts a new entry. Failed requests are dropped so a retry refetches.
   const memo = new Map();
   const questions = new Map(); // codebase tours started on this page: key → the question asked
+  const picks = new Map(); // key → the reader whose tour was picked to compare; a Re-read goes back to the chosen AI
 
   function open(key, sel = 'overview', fresh) {
+    if (fresh) picks.delete(key);
     let m = memo.get(key);
     if (!m || fresh) memo.set(key, (m = { t0: Date.now() }));
     const c = cur = { key, pr: m.pr || null, story: m.story || null, err: null, serr: null, t0: m.t0, sel, step: m.step || '' };
@@ -385,8 +387,28 @@
     bar();
   }
 
-  // The tour on screen was written by a different model than the one now chosen in Settings.
-  const stale = () => !!(cfg && cur?.story?.meta && (cfg.provider !== cur.story.meta.provider || (cfg.model && !String(cur.story.meta.model).startsWith(cfg.model))));
+  // The tour on screen was written by a different model than the one now chosen in Settings, which hasn't toured this commit.
+  const stale = () => !!(cfg && cur?.story?.meta && (cfg.provider !== cur.story.meta.provider || (cfg.model && !String(cur.story.meta.model).startsWith(cfg.model)))
+    && !cur.story.readers?.some((r) => r.reader === `${cfg.provider}-${cfg.model || 'default'}`));
+
+  // Every AI that toured this commit keeps its tour; the status bar switches between them to compare.
+  const PROVIDER_NAME = { anthropic: 'Anthropic API', openai: 'API', claude: 'Claude Code', codex: 'Codex', ollama: 'Ollama', lmstudio: 'LM Studio' };
+  const readerName = (r) => [/default$/i.test(r.model || '') ? '' : pretty(r.model), PROVIDER_NAME[r.provider || r.reader.split('-')[0]]].filter(Boolean).join(' · ') || r.reader;
+  function readBy(s) {
+    const rs = s.readers || [], here = rs.find((r) => r.at === s.meta.at)?.reader;
+    if (rs.length < 2 || !here) return `<button class="link quiet" data-settings title="Change who reads PRs">${esc(pretty(s.meta.model))}</button>`;
+    return `<select class="reader-pick" data-reader aria-label="Show the tour written by" title="${rs.length} AIs have toured this commit. Switch to compare them.">${rs.map((r) => `<option value="${esc(r.reader)}"${r.reader === here ? ' selected' : ''}>${esc(readerName(r))}</option>`).join('')}</select>`;
+  }
+  function pickReader(r) {
+    if (!cur || cur.demo) return;
+    picks.set(cur.key, r);
+    const m = memo.get(cur.key);
+    if (m) m.storyP = null; // the tour on screen stays until the picked one arrives
+    const sel = typeof cur.sel === 'number' ? 'overview' : cur.sel; // stops differ between tours
+    if (sel !== cur.sel) history.replaceState(null, '', `#/${cur.key}`);
+    open(cur.key, sel);
+  }
+  document.addEventListener('change', (e) => { if (e.target.matches?.('[data-reader]')) pickReader(e.target.value); });
 
   function bar() {
     if (cur.demo) return;
@@ -400,7 +422,7 @@
     status.innerHTML = `<span class="segs" aria-hidden="true">${s.stops.map((_, i) => `<i class="${d.has(i) ? 'on' : ''}${cur.sel === i ? ' here' : ''}"></i>`).join('')}</span>
       <span><b>${d.size}</b>/${n} understood</span>
       ${cur.pr.kind === 'repo' ? '' : u.hunks.length ? `<span class="warn">${plural(u.hunks.length, 'hunk')} unexplained</span>` : '<span>Every hunk explained</span>'}
-      <span class="muted">Read by <button class="link quiet" data-settings title="Change who reads PRs">${esc(pretty(s.meta.model))}</button> in ${clock(s.meta.ms)}${s.meta.from ? ` · <span title="Only the commits after ${esc(s.meta.from.slice(0, 7))} were read; the rest of the tour carried over">updated from <code>${esc(s.meta.from.slice(0, 7))}</code></span>` : ''} · <button class="link${stale() ? ' strong' : ''}" data-fresh title="Read the whole PR again with ${esc(reader())}">${stale() ? `Re-read with ${esc(reader())}` : 'Re-read all'}</button></span>
+      <span class="muted">Read by ${readBy(s)} in ${clock(s.meta.ms)}${s.meta.from ? ` · <span title="Only the commits after ${esc(s.meta.from.slice(0, 7))} were read; the rest of the tour carried over">updated from <code>${esc(s.meta.from.slice(0, 7))}</code></span>` : ''} · <button class="link${stale() ? ' strong' : ''}" data-fresh title="Read the whole PR again with ${esc(reader())}">${stale() ? `Re-read with ${esc(reader())}` : 'Re-read all'}</button></span>
       <span class="keys"><kbd>j</kbd><kbd>k</kbd> move <kbd>x</kbd> understood <kbd>/</kbd> open</span>`;
   }
 
@@ -939,12 +961,14 @@
   // API keys stay in this browser (localStorage, per provider) and go to the server only with a read.
   const keyOf = (id) => store.get(`key:${id}`, '');
   const pretty = (m) => String(m || '').replace(/^claude-([a-z]+)-(\d+)-(\d+)$/, (_, a, b, c) => `${a[0].toUpperCase()}${a.slice(1)} ${b}.${c}`);
-  const reader = () => (cfg ? pretty(cfg.model) || { codex: 'Codex', openai: 'the API', claude: 'Claude Code', anthropic: 'Claude' }[cfg.provider] : 'Claude');
+  const reader = () => (cfg ? pretty(cfg.model) || { codex: 'Codex', openai: 'the API', claude: 'Claude Code', anthropic: 'Claude', ollama: 'Ollama', lmstudio: 'LM Studio' }[cfg.provider] : 'Claude');
   const DESC = {
     anthropic: 'Your Anthropic API key. Reads are billed to your Anthropic account.',
     openai: 'OpenAI, OpenRouter or any OpenAI-compatible API, with your own key.',
     claude: "This machine's Claude Code login. Only when Readthrough runs on your own machine.",
     codex: "This machine's Codex login, which uses your ChatGPT plan. Only when Readthrough runs on your own machine.",
+    ollama: 'A model running in Ollama on this machine, so the PR goes to no AI company. Only when Readthrough runs on your own machine.',
+    lmstudio: "A model in LM Studio or LM Studio Bionic, through LM Studio's local server on port 1234. Only when Readthrough runs on your own machine.",
   };
   const MODEL_NOTE = { 'claude-sonnet-5-5': 'fast, the default', 'claude-opus-5-5': 'most thorough, slower', 'claude-haiku-5-5': 'quickest, lightest' };
 
@@ -959,7 +983,7 @@
         ${p.id === 'openai' ? `<label>Base URL <input name="baseURL-openai" value="${esc(c.baseURL)}" spellcheck="false"></label>` : ''}
         ${p.models
           ? `<label>Model <select name="model-${p.id}">${p.models.map((m) => `<option value="${m}"${c.provider === p.id && c.model === m ? ' selected' : ''}>${pretty(m)}${MODEL_NOTE[m] ? ` · ${MODEL_NOTE[m]}` : ''}</option>`).join('')}</select></label>`
-          : `<label>Model <input name="model-${p.id}" value="${c.provider === p.id ? esc(c.model) : ''}" placeholder="${p.id === 'codex' ? 'Blank uses your Codex default' : 'The model id your provider lists'}" spellcheck="false"></label>`}
+          : `<label>Model <input name="model-${p.id}" value="${c.provider === p.id ? esc(c.model) : ''}" placeholder="${{ codex: 'Blank uses your Codex default', ollama: 'A model you pulled, like qwen3-coder:30b', lmstudio: 'The model key from lms ls, like qwen/qwen3-coder-30b' }[p.id] || 'The model id your provider lists'}" spellcheck="false"></label>`}
         ${p.key ? `<label>API key <input name="key-${p.id}" type="password" autocomplete="off" spellcheck="false" placeholder="${keyOf(p.id) ? 'Saved in this browser. Leave blank to keep it.' : c.envKey?.includes(p.id) ? 'Using the key in this machine\'s environment' : 'Paste your key'}"></label>
           <p class="small muted">Kept only in this browser. It's sent over HTTPS with each read and used for that read alone; Readthrough never stores it.${keyOf(p.id) ? ` <button type="button" class="link" data-clearkey="${p.id}">Forget this key</button>` : ''}</p>` : ''}
       </div>`).join('')}
@@ -1152,8 +1176,8 @@
         <h2>What Readthrough can access</h2>
         <div class="l-trust">
           <div><b>GitHub, read-only</b><p>Your organization installs a read-only GitHub App. Each person sees only the pull requests their own account can read.</p></div>
-          <div><b>Your AI provider</b><p>Anthropic, OpenAI or OpenRouter with your own key, or the Claude Code and Codex logins on your machine. Readthrough has no model of its own.</p></div>
-          <div><b>Your database</b><p>Tours are saved in your Postgres or SQLite database, so a teammate can reopen one without paying for another read. API keys are encrypted at rest.</p></div>
+          <div><b>Your AI provider</b><p>Anthropic, OpenAI or OpenRouter with your own key, the Claude Code and Codex logins on your machine, or a local model in Ollama or LM Studio. Readthrough has no model of its own.</p></div>
+          <div><b>Your database</b><p>Tours are saved in your Postgres or SQLite database, so a teammate can reopen one without paying for another read. AI keys stay in your browser and are never stored.</p></div>
         </div>
       </section>
 

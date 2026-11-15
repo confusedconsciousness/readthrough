@@ -212,12 +212,15 @@ async function setAI(userId, { provider, model, baseURL }) {
 
 const keyOf = (ref) => [ref.owner, ref.repo, ref.num];
 
-// The tour for this commit by this reader, else the newest by any reader: a model switch shouldn't discard a tour.
-async function getTour(ref, sha, reader) {
-  const [r] = await q(`select data from tours where owner = $1 and repo = $2 and num = $3 and sha = $4
+// The tour for this commit by this reader, else (unless exact) the newest by any reader: a model switch shouldn't discard a tour.
+async function getTour(ref, sha, reader, exact = false) {
+  const [r] = await q(`select data from tours where owner = $1 and repo = $2 and num = $3 and sha = $4${exact ? ' and reader = $5' : ''}
     order by (reader = $5) desc, created_at desc limit 1`, [...keyOf(ref), sha, reader]);
   return r ? json(r.data) : null;
 }
+// Every AI that has toured this commit, oldest first, so a reader can switch between them and compare.
+const readers = (ref, sha) => q(`select reader, data->'meta'->>'provider' as provider, data->'meta'->>'model' as model, data->'meta'->>'at' as at
+  from tours where owner = $1 and repo = $2 and num = $3 and sha = $4 order by at`, [...keyOf(ref), sha]);
 const putTour = (ref, sha, reader, data, userId) => q(`insert into tours (owner, repo, num, sha, reader, data, created_by, created_at)
   values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict (owner, repo, num, sha, reader) do update set data = $6, created_at = $8, created_by = $7`,
 [...keyOf(ref), sha, reader, JSON.stringify(data), userId, now()]);
@@ -267,6 +270,6 @@ async function recentTours(userId, reader, { q: text = '', limit = 10, offset = 
 
 module.exports = {
   init, seal, unseal, upsertUser, tokensOf, setTokens, createSession, sessionUser, deleteSession, pruneSessions,
-  getAI, setAI, getTour, putTour, previousTour, toured, markOpened, recentTours, joinWaitlist, waitlist,
+  getAI, setAI, getTour, readers, putTour, previousTour, toured, markOpened, recentTours, joinWaitlist, waitlist,
   end: () => (kind === 'pg' ? pool?.end() : lite?.close()),
 };

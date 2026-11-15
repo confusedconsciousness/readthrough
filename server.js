@@ -236,7 +236,7 @@ async function saveSettings(user, b) {
     model ||= p.models[0];
     if (!p.models.includes(model)) throw new Error(`Pick one of the listed ${p.label} models.`);
   } else if (model && !/^[\w.:\/@-]{1,100}$/.test(model)) throw new Error('Model names are letters, digits and . : / @ - _');
-  if (b.provider === 'openai' && !model) throw new Error('Name the model the API should use.');
+  if (['openai', 'ollama', 'lmstudio'].includes(b.provider) && !model) throw new Error(b.provider === 'openai' ? 'Name the model the API should use.' : `Name a model you have in ${p.label}.`);
   let baseURL = null;
   if (b.provider === 'openai') {
     baseURL = String(b.baseURL || 'https://api.openai.com/v1').trim().replace(/\/+$/, '');
@@ -350,11 +350,14 @@ function carry(old, pr) {
 const nice = (m) => String(m || '').replace(/^claude-([a-z]+)-(\d+)-(\d+)$/, (_, a, b, c) => `${a[0].toUpperCase()}${a.slice(1)} ${b}.${c}`) || 'the model';
 const watch = (entry, onStep) => { if (!onStep) return entry.job; entry.listeners.add(onStep); if (entry.step) onStep(entry.step); return entry.job; };
 
-async function story(ctx, ref, fresh, onStep, aiKey) {
+// want: a reader whose saved tour of this commit to show instead of the chosen AI's (switching between tours to compare).
+async function story(ctx, ref, fresh, onStep, aiKey, want) {
   const pr = await loadPR(ctx, ref); // also the access check: GitHub refuses PRs this user can't see
   const cfg = await aiConfig(ctx.user, aiKey), reader = readerOf(cfg), key = `${refKey(ref)}@${pr.sha}#${reader}`;
   await db.markOpened(ctx.user.id, ref);
   if (!fresh) {
+    const picked = want && (await db.getTour(ref, pr.sha, want, true));
+    if (picked) return picked;
     // The chosen model is already reading this commit (a re-read, say): wait for it rather than show the older tour it replaces.
     if (inflight.has(key)) return watch(inflight.get(key), onStep);
     const hit = await db.getTour(ref, pr.sha, reader);
@@ -513,12 +516,14 @@ async function repoShell(ctx, ref) {
   };
 }
 
-async function repoStory(ctx, ref, question, fresh, onStep, aiKey) {
+async function repoStory(ctx, ref, question, fresh, onStep, aiKey, want) {
   const info = await repoInfo(ctx, ref); // also the access check
   const cfg = await aiConfig(ctx.user, aiKey), reader = readerOf(cfg), key = `${refKey(ref)}@${info.sha}#${reader}`;
   await db.markOpened(ctx.user.id, ref);
   const old = await db.previousTour(ref, info.sha);
   if (!fresh) {
+    const picked = want && (await db.getTour(ref, info.sha, want, true));
+    if (picked) return picked;
     if (inflight.has(key)) return watch(inflight.get(key), onStep);
     const hit = await db.getTour(ref, info.sha, reader);
     if (hit) return hit;
@@ -814,7 +819,9 @@ async function handle(req, res) {
     ev('progress', ref.num < 0 ? 'Fetching the repository' : 'Fetching the pull request');
     try {
       const go = (t) => ev('progress', t), question = typeof b.question === 'string' ? b.question : null;
-      const { anchors, ...s } = ref.num < 0 ? await repoStory(ctx, ref, question, b.fresh === true, go, aiKey) : await story(ctx, ref, b.fresh === true, go, aiKey); // anchors stay on the server
+      const want = typeof b.reader === 'string' && /^[\w.:\/@-]{1,120}$/.test(b.reader) ? b.reader : null;
+      const { anchors, ...s } = ref.num < 0 ? await repoStory(ctx, ref, question, b.fresh === true, go, aiKey, want) : await story(ctx, ref, b.fresh === true, go, aiKey, want); // anchors stay on the server
+      s.readers = s.meta?.sha ? await db.readers(ref, s.meta.sha) : [];
       ev('done', s);
     } catch (e) {
       ev('failed', { error: e.message });
