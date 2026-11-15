@@ -224,7 +224,10 @@ async function aiConfig(user, key) {
 async function publicSettings(user) {
   const c = await aiConfig(user);
   const envKey = Object.keys(ENV_KEYS).filter((p) => ENV_KEYS[p]);
-  return { provider: c.provider, model: c.model, baseURL: c.baseURL || 'https://api.openai.com/v1', envKey, providers: available(), installed: ai.installed, mode: MODE };
+  // Locally, the models each local AI offers, so the form can offer a list instead of a blank box.
+  const local = MODE === 'local' ? ['codex', 'ollama', 'lmstudio'] : [];
+  const choices = Object.fromEntries(await Promise.all(local.map(async (p) => [p, await ai.models(p)])));
+  return { provider: c.provider, model: c.model, baseURL: c.baseURL || 'https://api.openai.com/v1', envKey, providers: available(), installed: ai.installed, choices, mode: MODE };
 }
 
 // Trust boundary: everything the settings form sends is checked here.
@@ -236,6 +239,7 @@ async function saveSettings(user, b) {
     model ||= p.models[0];
     if (!p.models.includes(model)) throw new Error(`Pick one of the listed ${p.label} models.`);
   } else if (model && !/^[\w.:\/@-]{1,100}$/.test(model)) throw new Error('Model names are letters, digits and . : / @ - _');
+  if (b.provider === 'codex' && !/^([\w.:\/-]+(@[a-z]+)?)?$/.test(model)) throw new Error('Pick a Codex model, then its reasoning effort.');
   if (['openai', 'ollama', 'lmstudio'].includes(b.provider) && !model) throw new Error(b.provider === 'openai' ? 'Name the model the API should use.' : `Name a model you have in ${p.label}.`);
   let baseURL = null;
   if (b.provider === 'openai') {

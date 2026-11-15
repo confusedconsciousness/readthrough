@@ -371,6 +371,14 @@ async function viaClaudeCode(cfg, input, system, schema) {
   return { s: out.structured_output, model: model || cfg.model };
 }
 
+// A Codex model can carry a reasoning effort, "gpt-6.1-sol@high". The effort is part of who read the PR, so tours at
+// different efforts are kept apart and can be compared.
+const codexModel = (m) => {
+  if (!m) return [];
+  const [model, effort] = m.split('@');
+  return ['-m', model, ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : [])];
+};
+
 async function viaCodex(cfg, input, system, schema) {
   // Codex is an agent: give it an empty read-only folder, and take its schema-checked last message from a file.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'readthrough-'));
@@ -379,7 +387,7 @@ async function viaCodex(cfg, input, system, schema) {
     await run('codex', [
       'exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only',
       '--output-schema', path.join(dir, 'schema.json'), '-o', path.join(dir, 'out.json'),
-      ...(cfg.model ? ['-m', cfg.model] : []), '-',
+      ...codexModel(cfg.model), '-',
     ], { input: `${system}\n\n${input}`, timeout: 20 * 60_000, cwd: dir });
     return { s: JSON.parse(fs.readFileSync(path.join(dir, 'out.json'), 'utf8')), model: cfg.model || 'Codex default' };
   } finally {
@@ -596,7 +604,7 @@ async function exploreCodex(cfg, dir, meta) {
     await run('codex', [
       'exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only', '-C', dir,
       '--output-schema', path.join(tmp, 'schema.json'), '-o', path.join(tmp, 'out.json'),
-      ...(cfg.model ? ['-m', cfg.model] : []), '-',
+      ...codexModel(cfg.model), '-',
     ], { input: `${REPO_SYSTEM}\n\n${repoPrompt(meta, dir, 'The repository is the current directory. Explore it with read-only commands, then answer with the tour.')}`, timeout: 30 * 60_000, cwd: dir });
     return { s: JSON.parse(fs.readFileSync(path.join(tmp, 'out.json'), 'utf8')), model: cfg.model || 'Codex default' };
   } finally {
@@ -613,8 +621,22 @@ async function exploreRepo(cfg, local, dir, meta, onStep) {
   return { anthropic: exploreAnthropic, claude: exploreClaudeCode, codex: exploreCodex }[cfg.provider](cfg, dir, meta, onStep);
 }
 
+// The models each local AI offers, for the Settings picker: [] when it isn't running, and the form takes a typed name.
+// Codex's catalogue comes from its own CLI (under a second, so it's kept); Ollama and LM Studio are asked each time.
+let codexList = null;
+async function models(provider) {
+  const get = (url, pick) => fetch(url, { signal: AbortSignal.timeout(1500) }).then((r) => r.json()).then(pick, () => []);
+  if (provider === 'ollama') return get(`${OLLAMA}/api/tags`, (j) => j.models.map((m) => ({ id: m.name, name: m.name })));
+  if (provider === 'lmstudio') return get(`${LMSTUDIO}/v1/models`, (j) => j.data.filter((m) => !/embed/i.test(m.id)).map((m) => ({ id: m.id, name: m.id })));
+  if (provider !== 'codex') return [];
+  return (codexList ||= run('codex', ['debug', 'models'], { timeout: 10_000 }).then((out) => JSON.parse(out).models
+    .filter((m) => m.visibility === 'list')
+    .map((m) => ({ id: m.slug, name: m.display_name, efforts: m.supported_reasoning_levels.map((l) => l.effort), effort: m.default_reasoning_level })))
+    .catch(() => { codexList = null; return []; }));
+}
+
 // Find which local CLIs exist, once at startup.
 const installed = {};
 for (const cmd of ['claude', 'codex']) execFile(cmd, ['--version'], (err) => { installed[cmd] = !err; });
 
-module.exports = { analyse, update, exploreRepo, repoTools, PROVIDERS, installed, SCHEMA, UPDATE_SCHEMA, REPO_SCHEMA };
+module.exports = { models, analyse, update, exploreRepo, repoTools, PROVIDERS, installed, SCHEMA, UPDATE_SCHEMA, REPO_SCHEMA };

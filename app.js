@@ -393,11 +393,14 @@
 
   // Every AI that toured this commit keeps its tour; the status bar switches between them to compare.
   const PROVIDER_NAME = { anthropic: 'Anthropic API', openai: 'API', claude: 'Claude Code', codex: 'Codex', ollama: 'Ollama', lmstudio: 'LM Studio' };
-  const readerName = (r) => [/default$/i.test(r.model || '') ? '' : pretty(r.model), PROVIDER_NAME[r.provider || r.reader.split('-')[0]]].filter(Boolean).join(' · ') || r.reader;
+  const readerParts = (r) => [/default$/i.test(r.model || '') ? '' : pretty(r.model), PROVIDER_NAME[r.provider || r.reader.split('-')[0]]];
+  const readerName = (r) => readerParts(r).filter(Boolean).join(' · ') || r.reader;
+  // One button per AI. The model alone names it, unless two tours share a model (say, Sonnet via Claude Code and the API).
   function readBy(s) {
     const rs = s.readers || [], here = rs.find((r) => r.at === s.meta.at)?.reader;
     if (rs.length < 2 || !here) return `<button class="link quiet" data-settings title="Change who reads PRs">${esc(pretty(s.meta.model))}</button>`;
-    return `<select class="reader-pick" data-reader aria-label="Show the tour written by" title="${rs.length} AIs have toured this commit. Switch to compare them.">${rs.map((r) => `<option value="${esc(r.reader)}"${r.reader === here ? ' selected' : ''}>${esc(readerName(r))}</option>`).join('')}</select>`;
+    const short = (r) => { const [m] = readerParts(r); return m && rs.filter((x) => readerParts(x)[0] === m).length === 1 ? m : readerName(r); };
+    return `<span class="seg-btns reader-pick" role="group" aria-label="Show the tour written by">${rs.map((r) => `<button type="button" data-reader="${esc(r.reader)}" class="${r.reader === here ? 'on' : ''}" aria-pressed="${r.reader === here}" title="${esc(readerName(r))}">${esc(short(r))}</button>`).join('')}</span>`;
   }
   function pickReader(r) {
     if (!cur || cur.demo) return;
@@ -408,7 +411,7 @@
     if (sel !== cur.sel) history.replaceState(null, '', `#/${cur.key}`);
     open(cur.key, sel);
   }
-  document.addEventListener('change', (e) => { if (e.target.matches?.('[data-reader]')) pickReader(e.target.value); });
+  document.addEventListener('click', (e) => { const b = e.target.closest?.('[data-reader]'); if (b && !b.classList.contains('on')) pickReader(b.dataset.reader); });
 
   function bar() {
     if (cur.demo) return;
@@ -960,7 +963,7 @@
   let cfg = null, cfgP = null; // cfgP: the settings, once loaded (a read waits for it to know which key to send)
   // API keys stay in this browser (localStorage, per provider) and go to the server only with a read.
   const keyOf = (id) => store.get(`key:${id}`, '');
-  const pretty = (m) => String(m || '').replace(/^claude-([a-z]+)-(\d+)-(\d+)$/, (_, a, b, c) => `${a[0].toUpperCase()}${a.slice(1)} ${b}.${c}`);
+  const pretty = (m) => String(m || '').replace(/^claude-([a-z]+)-(\d+)-(\d+)$/, (_, a, b, c) => `${a[0].toUpperCase()}${a.slice(1)} ${b}.${c}`).replace(/@(\w+)$/, ' · $1');
   const reader = () => (cfg ? pretty(cfg.model) || { codex: 'Codex', openai: 'the API', claude: 'Claude Code', anthropic: 'Claude', ollama: 'Ollama', lmstudio: 'LM Studio' }[cfg.provider] : 'Claude');
   const DESC = {
     anthropic: 'Your Anthropic API key. Reads are billed to your Anthropic account.',
@@ -983,6 +986,7 @@
         ${p.id === 'openai' ? `<label>Base URL <input name="baseURL-openai" value="${esc(c.baseURL)}" spellcheck="false"></label>` : ''}
         ${p.models
           ? `<label>Model <select name="model-${p.id}">${p.models.map((m) => `<option value="${m}"${c.provider === p.id && c.model === m ? ' selected' : ''}>${pretty(m)}${MODEL_NOTE[m] ? ` · ${MODEL_NOTE[m]}` : ''}</option>`).join('')}</select></label>`
+          : c.choices?.[p.id]?.length ? modelPicker(c, p)
           : `<label>Model <input name="model-${p.id}" value="${c.provider === p.id ? esc(c.model) : ''}" placeholder="${{ codex: 'Blank uses your Codex default', ollama: 'A model you pulled, like qwen3-coder:30b', lmstudio: 'The model key from lms ls, like qwen/qwen3-coder-30b' }[p.id] || 'The model id your provider lists'}" spellcheck="false"></label>`}
         ${p.key ? `<label>API key <input name="key-${p.id}" type="password" autocomplete="off" spellcheck="false" placeholder="${keyOf(p.id) ? 'Saved in this browser. Leave blank to keep it.' : c.envKey?.includes(p.id) ? 'Using the key in this machine\'s environment' : 'Paste your key'}"></label>
           <p class="small muted">Kept only in this browser. It's sent over HTTPS with each read and used for that read alone; Readthrough never stores it.${keyOf(p.id) ? ` <button type="button" class="link" data-clearkey="${p.id}">Forget this key</button>` : ''}</p>` : ''}
@@ -994,10 +998,29 @@
 
   const syncFields = () => $$('.fields', form).forEach((d) => { d.hidden = d.dataset.for !== form.elements.provider.value; });
 
+  // A local AI's own list of models (Codex's catalogue, what Ollama has pulled, what LM Studio has), when it answered.
+  // Codex also takes a reasoning effort, sent as model@effort.
+  function modelPicker(c, p) {
+    const [now, effort = ''] = c.provider === p.id ? String(c.model || '').split('@') : [''];
+    const opts = [...(p.id === 'codex' ? [{ id: '', name: 'Codex default' }] : []), ...c.choices[p.id]];
+    if (now && !opts.some((m) => m.id === now)) opts.push({ id: now, name: now });
+    return `<label>Model <select name="model-${p.id}">${opts.map((m) => `<option value="${esc(m.id)}"${m.id === now ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select></label>
+      ${p.id === 'codex' ? `<label>Reasoning effort <select name="effort-codex" data-was="${esc(effort)}"></select></label>` : ''}`;
+  }
+  // The efforts the chosen Codex model supports; none to pick for "Codex default", which uses Codex's own setting.
+  function syncEffort() {
+    const sel = form.elements['effort-codex'];
+    if (!sel) return;
+    const m = cfg.choices.codex.find((x) => x.id === form.elements['model-codex'].value), was = sel.value || sel.dataset.was;
+    sel.innerHTML = `<option value="">${m ? `Model default (${esc(m.effort)})` : "Codex's own setting"}</option>${(m?.efforts || []).map((e) => `<option value="${esc(e)}"${e === was ? ' selected' : ''}>${esc(e)}</option>`).join('')}`;
+    sel.disabled = !m;
+  }
+
   async function openSettings() {
     cfg = await (cfgP = api('/api/settings'));
     form.innerHTML = settingsForm(cfg);
     syncFields();
+    syncEffort();
     if (!dlg.open) dlg.showModal();
   }
 
@@ -1008,7 +1031,7 @@
     return j;
   }
 
-  form.addEventListener('change', (e) => { if (e.target.name === 'provider') syncFields(); });
+  form.addEventListener('change', (e) => { if (e.target.name === 'provider') syncFields(); if (e.target.name === 'model-codex') syncEffort(); });
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const f = form.elements, provider = f.provider.value, key = (f[`key-${provider}`]?.value || '').trim();
@@ -1016,7 +1039,8 @@
     try {
       if (p?.key && !key && !keyOf(provider) && !cfg.envKey?.includes(provider)) throw new Error(`Paste your ${p.label} key.`);
       if (key.length > 500) throw new Error('That key is too long.');
-      cfg = await postSettings({ provider, model: f[`model-${provider}`]?.value, baseURL: f['baseURL-openai']?.value });
+      const effort = provider === 'codex' && !f['effort-codex']?.disabled ? f['effort-codex']?.value : '';
+      cfg = await postSettings({ provider, model: (f[`model-${provider}`]?.value || '') + (effort ? `@${effort}` : ''), baseURL: f['baseURL-openai']?.value });
       cfgP = Promise.resolve(cfg);
       if (key) store.set(`key:${provider}`, key);
       dlg.close();
