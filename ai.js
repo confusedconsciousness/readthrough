@@ -9,9 +9,10 @@ const Anthropic = require('@anthropic-ai/sdk');
 
 const EFFORT = process.env.READTHROUGH_EFFORT || 'high';
 
-function run(cmd, args, { input, timeout = 60_000, cwd } = {}) {
+// signal: a cancelled read kills the CLI.
+function run(cmd, args, { input, timeout = 60_000, cwd, signal } = {}) {
   return new Promise((resolve, reject) => {
-    const p = execFile(cmd, args, { maxBuffer: 512 << 20, timeout, cwd }, (err, out, errOut) => {
+    const p = execFile(cmd, args, { maxBuffer: 512 << 20, timeout, cwd, signal }, (err, out, errOut) => {
       if (!err) return resolve(out);
       let msg = (errOut || out || err.message).trim().split('\n').slice(-3).join(' ');
       try { const j = JSON.parse(out); if (typeof j.result === 'string' && j.result) msg = j.result; } catch {} // claude -p reports errors as JSON on stdout
@@ -216,6 +217,9 @@ const OLLAMA = (process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/^(
 // Models that accept server-side refusal fallbacks; on these a policy decline is retried on a fallback model.
 const FALLBACKS = new Set(['claude-opus-5-5', 'claude-sonnet-5-5']);
 
+// A read's deadline, which a cancel (cfg.signal) also ends.
+const until = (cfg, ms) => (cfg.signal ? AbortSignal.any([AbortSignal.timeout(ms), cfg.signal]) : AbortSignal.timeout(ms));
+
 // A signed-out or expired Claude login is the common local failure; say what to do instead of echoing the CLI.
 function claudeError(msg) {
   if (/auth|log ?in|sign in|credential|token/i.test(msg)) {
@@ -237,8 +241,8 @@ async function viaAnthropic(cfg, input, system, schema) {
   let msg;
   try {
     msg = await (FALLBACKS.has(model)
-      ? client.beta.messages.stream({ ...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' })
-      : client.messages.stream(params)).finalMessage();
+      ? client.beta.messages.stream({ ...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' }, { signal: cfg.signal })
+      : client.messages.stream(params, { signal: cfg.signal })).finalMessage();
   } catch (e) {
     if (e instanceof Anthropic.AuthenticationError) throw new Error('Anthropic rejected your API key. Check it in Settings.');
     if (e instanceof Anthropic.PermissionDeniedError) throw new Error(`Your Anthropic key can't use ${model}. Pick another model in Settings.`);
@@ -262,7 +266,7 @@ async function viaOpenAI(cfg, input, system, schema) {
       messages: [{ role: 'system', content: system }, { role: 'user', content: input }],
       response_format: { type: 'json_schema', json_schema: { name: 'tour', strict: true, schema } },
     }),
-    signal: AbortSignal.timeout(20 * 60_000),
+    signal: until(cfg, 20 * 60_000),
   });
   const j = await r.json().catch(() => ({}));
   if (r.status === 401) throw new Error('The API rejected your key. Check it in Settings.');
@@ -307,7 +311,7 @@ async function viaOllama(cfg, input, system, schema) {
       // token plus room for the tour; count real tokens if this misjudges.
       options: { num_ctx: Math.min(131072, Math.ceil((system.length + input.length) / 3) + 16384) },
     }),
-    signal: AbortSignal.timeout(30 * 60_000),
+    signal: until(cfg, 30 * 60_000),
   }).catch((e) => { throw fail(e); });
   if (!r.ok) {
     const err = (await r.json().catch(() => ({}))).error || `it answered ${r.status}`;
@@ -338,7 +342,7 @@ async function viaLMStudio(cfg, input, system, schema) {
       messages: [{ role: 'system', content: system }, { role: 'user', content: input }],
       response_format: { type: 'json_schema', json_schema: { name: 'tour', strict: true, schema } },
     }),
-    signal: AbortSignal.timeout(30 * 60_000),
+    signal: until(cfg, 30 * 60_000),
   }).catch((e) => { throw fail(e); });
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
@@ -365,7 +369,7 @@ async function viaClaudeCode(cfg, input, system, schema) {
     '-p', '--output-format', 'json', '--model', cfg.model || 'claude-sonnet-5-5', '--effort', EFFORT,
     '--tools', '', '--setting-sources', '', '--strict-mcp-config', '--no-session-persistence',
     '--system-prompt', system, '--json-schema', JSON.stringify(schema),
-  ], { input, timeout: 20 * 60_000, cwd: os.tmpdir() }).catch((e) => { throw claudeError(e.message); }));
+  ], { input, timeout: 20 * 60_000, cwd: os.tmpdir(), signal: cfg.signal }).catch((e) => { throw claudeError(e.message); }));
   if (out.is_error || !out.structured_output) throw claudeError(out.result || 'Claude returned no analysis');
   const model = Object.entries(out.modelUsage || {}).sort((a, b) => b[1].outputTokens - a[1].outputTokens)[0]?.[0];
   return { s: out.structured_output, model: model || cfg.model };
@@ -388,7 +392,7 @@ async function viaCodex(cfg, input, system, schema) {
       'exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only',
       '--output-schema', path.join(dir, 'schema.json'), '-o', path.join(dir, 'out.json'),
       ...codexModel(cfg.model), '-',
-    ], { input: `${system}\n\n${input}`, timeout: 20 * 60_000, cwd: dir });
+    ], { input: `${system}\n\n${input}`, timeout: 20 * 60_000, cwd: dir, signal: cfg.signal });
     return { s: JSON.parse(fs.readFileSync(path.join(dir, 'out.json'), 'utf8')), model: cfg.model || 'Codex default' };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -563,7 +567,7 @@ async function exploreAnthropic(cfg, dir, meta, onStep) {
   for (let turn = 0; turn < MAX_TURNS + 3; turn++) {
     let msg;
     try {
-      msg = await client.messages.stream({ model, max_tokens: 64000, thinking: { type: 'adaptive' }, output_config: { effort: EFFORT }, system: REPO_SYSTEM, tools, messages }).finalMessage();
+      msg = await client.messages.stream({ model, max_tokens: 64000, thinking: { type: 'adaptive' }, output_config: { effort: EFFORT }, system: REPO_SYSTEM, tools, messages }, { signal: cfg.signal }).finalMessage();
     } catch (e) { throw anthropicError(e, model); }
     if (msg.stop_reason === 'refusal') throw new Error('Claude declined to read this repository.');
     if (msg.stop_reason === 'max_tokens') throw new Error('The tour ran past the output limit. Ask a narrower question.');
@@ -590,7 +594,7 @@ async function exploreClaudeCode(cfg, dir, meta) {
     '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--permission-mode', 'dontAsk',
     '--setting-sources', '', '--strict-mcp-config', '--no-session-persistence',
     '--system-prompt', REPO_SYSTEM, '--json-schema', JSON.stringify(REPO_SCHEMA),
-  ], { input: repoPrompt(meta, dir, 'The repository is the current directory. Explore it with your Read, Grep and Glob tools, then answer with the tour.'), timeout: 30 * 60_000, cwd: dir })
+  ], { input: repoPrompt(meta, dir, 'The repository is the current directory. Explore it with your Read, Grep and Glob tools, then answer with the tour.'), timeout: 30 * 60_000, cwd: dir, signal: cfg.signal })
     .catch((e) => { throw claudeError(e.message); }));
   if (out.is_error || !out.structured_output) throw claudeError(out.result || 'Claude returned no tour');
   const model = Object.entries(out.modelUsage || {}).sort((a, b) => b[1].outputTokens - a[1].outputTokens)[0]?.[0];
@@ -605,7 +609,7 @@ async function exploreCodex(cfg, dir, meta) {
       'exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only', '-C', dir,
       '--output-schema', path.join(tmp, 'schema.json'), '-o', path.join(tmp, 'out.json'),
       ...codexModel(cfg.model), '-',
-    ], { input: `${REPO_SYSTEM}\n\n${repoPrompt(meta, dir, 'The repository is the current directory. Explore it with read-only commands, then answer with the tour.')}`, timeout: 30 * 60_000, cwd: dir });
+    ], { input: `${REPO_SYSTEM}\n\n${repoPrompt(meta, dir, 'The repository is the current directory. Explore it with read-only commands, then answer with the tour.')}`, timeout: 30 * 60_000, cwd: dir, signal: cfg.signal });
     return { s: JSON.parse(fs.readFileSync(path.join(tmp, 'out.json'), 'utf8')), model: cfg.model || 'Codex default' };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

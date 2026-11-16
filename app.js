@@ -50,6 +50,7 @@
             const block = buf.slice(0, i), name = /^event: (.*)$/m.exec(block)?.[1], data = /^data: (.*)$/m.exec(block)?.[1];
             buf = buf.slice(i + 2);
             if (name === 'progress') { misses = 0; onStep(JSON.parse(data)); }
+            if (name === 'eta') onStep({ eta: JSON.parse(data) });
             if (name === 'done') return resolve(JSON.parse(data));
             if (name === 'failed') return reject(new Error(JSON.parse(data).error));
           }
@@ -148,14 +149,47 @@
   function open(key, sel = 'overview', fresh) {
     if (fresh) picks.delete(key);
     let m = memo.get(key);
-    if (!m || fresh) memo.set(key, (m = { t0: Date.now() }));
-    const c = cur = { key, pr: m.pr || null, story: m.story || null, err: null, serr: null, t0: m.t0, sel, step: m.step || '' };
+    // A Re-read keeps the tour it replaces (prev), so cancelling it goes back to that tour.
+    if (!m || fresh) memo.set(key, (m = { t0: Date.now(), prev: m?.story || m?.prev || null }));
+    const c = cur = { key, pr: m.pr || null, story: m.story || null, err: null, serr: null, t0: m.t0, sel, step: m.step || '', eta: m.eta || null };
     render();
     m.prP ||= api(`/api/pr?pr=${key}`).then((pr) => { m.pr = m.story?.pr || pr; if (pr.reading && !m.story) m.t0 = pr.reading; return m.pr; });
-    m.storyP ||= readStream(key, fresh, (t) => { m.step = t; if (c === cur) { c.step = t; stepUI(); } }).then((st) => (m.story = st));
+    const onStep = (t) => {
+      if (t?.eta) { m.eta = t.eta; if (c === cur) { c.eta = t.eta; if (!c.story && $('.tour')) $('.tour').innerHTML = tour(); bar(); } return; }
+      m.step = t;
+      if (c === cur) { c.step = t; stepUI(); }
+    };
+    const sp = (m.storyP ||= readStream(key, fresh, onStep).then((st) => (m.story = st)));
     m.prP.then((pr) => { if (c === cur) { c.pr = pr; c.t0 = m.t0; render(); } }, (e) => { m.prP = null; if (c === cur) { c.err = e.message; render(); } });
-    m.storyP.then((st) => { if (st.pr) m.pr = st.pr; if (c === cur) { c.story = st; if (st.pr) c.pr = st.pr; render(); } else if (!cur) refreshRecent(); }, (e) => { m.storyP = null; if (c === cur) { c.serr = e.message; render(); } });
+    sp.then((st) => { if (st.pr) m.pr = st.pr; if (c === cur) { c.story = st; if (st.pr) c.pr = st.pr; render(); } else if (!cur) refreshRecent(); }, (e) => {
+      if (m.storyP !== sp) return; // cancelled back to the earlier tour
+      m.storyP = null;
+      if (c === cur) { c.serr = e.message; render(); }
+    });
   }
+
+  // Stops this person's read of the open PR. A cancelled Re-read goes back to the tour it was replacing; a first read
+  // shows "Read cancelled." with Try again.
+  async function cancelRead() {
+    const key = cur.key, m = memo.get(key);
+    await fetch('/api/story/cancel', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pr: key }) }).catch(() => {});
+    if (!m?.prev) return;
+    Object.assign(m, { story: m.prev, storyP: Promise.resolve(m.prev), step: '', eta: null });
+    if (cur?.key === key) { Object.assign(cur, { story: m.prev, serr: null, step: '', eta: null }); if (m.prev.pr) cur.pr = m.prev.pr; render(); }
+  }
+  document.addEventListener('click', (e) => { if (e.target.closest?.('[data-cancel]') && cur && !cur.demo) cancelRead(); });
+
+  // "0:12 of ~0:40" while a read runs, from the server's estimate; past it, "usually ~0:40".
+  const CANCELLED = 'Read cancelled.'; // the server's words for a cancelled read
+  const elapsedText = (since, eta) => {
+    const t = Date.now() - since;
+    return clock(t) + (eta ? (t <= eta ? ` of ~${clock(eta)}` : ` · usually ~${clock(eta)}`) : '');
+  };
+  const reading = () => cur?.step && !/^Fetching/.test(cur.step) && !cur.serr;
+  const timer = () => `<span class="elapsed" data-since="${cur.t0}"${cur.eta ? ` data-eta="${cur.eta}"` : ''}>${elapsedText(cur.t0, cur.eta)}</span>`;
+  const progress = () => (cur.eta
+    ? `<div class="bar-det"><i data-since="${cur.t0}" data-eta="${cur.eta}" style="width:${Math.min(97, ((Date.now() - cur.t0) / cur.eta) * 100)}%"></i></div>`
+    : '<div class="bar-indef"></div>');
 
   // The reviewer: seven dimensions, each graded good / fair / poor (or unclear when the diff can't tell).
   const DIMS = [
@@ -349,8 +383,8 @@
     const { pr, story: s, serr } = cur;
     const sinceRow = hasSince(pr) ? `<a class="row" data-sel="since">Since last tour<span class="c new">${pr.since.rewritten ? 'rebased' : `${pr.since.commits.length} new`}</span></a>` : '';
     if (!s) return `${sinceRow}<a class="row" data-sel="overview">Overview</a>
-      ${serr ? `<p class="tour-msg bad">The tour couldn't be written.<br><button class="link" data-fresh>Try again</button></p>`
-        : `<p class="tour-msg"><span class="tm-step">${cur.step ? esc(cur.step) : pr.toured && !pr.reading ? 'Opening the saved tour' : pr.kind === 'repo' ? 'Exploring the repository' : `Reading ${plural(pr.files.length, 'file')}`}</span> · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></p><div class="bar-indef"></div>`}`;
+      ${serr ? (serr === CANCELLED ? '<p class="tour-msg">Read cancelled.<br><button class="link" data-fresh>Read it</button></p>' : `<p class="tour-msg bad">The tour couldn't be written.<br><button class="link" data-fresh>Try again</button></p>`)
+        : `<p class="tour-msg"><span class="tm-step">${cur.step ? esc(cur.step) : pr.toured && !pr.reading ? 'Opening the saved tour' : pr.kind === 'repo' ? 'Exploring the repository' : `Reading ${plural(pr.files.length, 'file')}`}</span> · ${timer()}${reading() ? ' · <button class="link" data-cancel>Cancel</button>' : ''}</p>${progress()}`}`;
     const d = done(), ix = index(pr), u = unread(pr, s);
     const size = (st) => st.hunks.reduce((n, id) => n + (ix.get(id)?.h.add || 0) + (ix.get(id)?.h.del || 0), 0);
     const stopRows = depth() === 'glance'
@@ -418,7 +452,7 @@
     const s = cur.story;
     if (!s) {
       const p = cur.pr, what = cur.step ? esc(cur.step) : !p ? 'Opening the pull request' : p.toured && !p.reading ? 'Opening the saved tour' : p.since && !p.since.rewritten ? `Reading the new commits with ${esc(reader())}` : `Reading with ${esc(reader())}`;
-      status.innerHTML = cur.serr ? `<span class="bad">The read failed. The reason is in the left-hand pane.</span>` : `<span>${what} · <span class="elapsed" data-since="${cur.t0}">${clock(Date.now() - cur.t0)}</span></span>`;
+      status.innerHTML = cur.serr === CANCELLED ? '<span>Read cancelled.</span>' : cur.serr ? `<span class="bad">The read failed. The reason is in the left-hand pane.</span>` : `<span>${what} · ${timer()}</span>${reading() ? '<button class="link" data-cancel>Cancel read</button>' : ''}`;
       return;
     }
     const d = done(), n = s.stops.length, u = unread(cur.pr, s);
@@ -432,7 +466,8 @@
   function waiting() {
     const { pr } = cur;
     return [`${heading(pr)}
-      ${cur.serr ? `<div class="notice bad"><p>${prose(cur.serr)}</p><div class="row-end"><button class="btn" data-settings>Settings</button><button class="btn primary" data-fresh>Try again</button></div></div>`
+      ${cur.serr === CANCELLED ? `<div class="notice notice-plain"><p>You cancelled this read. The diff is on the right.</p><div class="row-end"><button class="btn primary" data-fresh>Read it</button></div></div>`
+        : cur.serr ? `<div class="notice bad"><p>${prose(cur.serr)}</p><div class="row-end"><button class="btn" data-settings>Settings</button><button class="btn primary" data-fresh>Try again</button></div></div>`
         : pr.kind === 'repo' ? '<p class="muted">Readthrough is reading the repository and following the code. This usually takes a few minutes.</p>'
         : `<p class="muted">The tour is being written. The diff is on the right in file order until then.</p>`}
       ${pr.kind === 'repo' ? '' : facts(pr) + desc(pr, true)}`,
@@ -1455,7 +1490,10 @@
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyPalette);
   applyPalette();
 
-  setInterval(() => $$('.elapsed[data-since]').forEach((el) => (el.textContent = clock(Date.now() - +el.dataset.since))), 1000);
+  setInterval(() => {
+    $$('.elapsed[data-since]').forEach((el) => (el.textContent = elapsedText(+el.dataset.since, +el.dataset.eta || 0)));
+    $$('.bar-det i').forEach((el) => (el.style.width = `${Math.min(97, ((Date.now() - el.dataset.since) / el.dataset.eta) * 100)}%`));
+  }, 1000);
 
   addEventListener('hashchange', route);
   api('/api/me').then((m) => { me = m; }, () => { me = { mode: 'local', user: null }; }).then(() => {

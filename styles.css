@@ -222,7 +222,9 @@ body[data-view="home"] .top .go { visibility: hidden; }
 .tour .row.done.sel .t { color: var(--fg); }
 .tour-msg { margin: 14px 8px 8px; color: var(--fg-2); }
 .tour-msg .elapsed { font-variant-numeric: tabular-nums; }
-.tour .bar-indef { margin: 0 8px; }
+.tour .bar-indef, .tour .bar-det { margin: 0 8px; }
+.bar-det { height: 2px; background: var(--line); overflow: hidden; border-radius: 1px; }
+.bar-det i { display: block; height: 100%; background: var(--fg-3); transition: width 1s linear; }
 
 /* ---------- note ---------- */
 

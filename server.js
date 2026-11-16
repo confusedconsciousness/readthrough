@@ -352,7 +352,39 @@ function carry(old, pr) {
 
 // Readers watching a read: each in-flight entry keeps its current step and who to tell when it changes.
 const nice = (m) => String(m || '').replace(/^claude-([a-z]+)-(\d+)-(\d+)$/, (_, a, b, c) => `${a[0].toUpperCase()}${a.slice(1)} ${b}.${c}`) || 'the model';
-const watch = (entry, onStep) => { if (!onStep) return entry.job; entry.listeners.add(onStep); if (entry.step) onStep(entry.step); return entry.job; };
+const watch = (entry, onStep) => {
+  if (!onStep) return entry.job;
+  entry.listeners.add(onStep);
+  if (entry.step) onStep(entry.step);
+  if (entry.eta) onStep({ eta: entry.eta });
+  return entry.job;
+};
+// A read in progress: its listeners hear each step (a string) and the estimate ({ eta }). Cancelling aborts ctl, which
+// every provider passes to its request or CLI. The job settles when it ends, and only then leaves the in-flight map
+// (unless a cancel already let a new read take its place).
+function startRead(key, fields, cfg, run) {
+  const entry = { since: Date.now(), ...fields, model: cfg.model || cfg.provider, step: '', eta: null, listeners: new Set(), ctl: new AbortController() };
+  const tell = (x) => entry.listeners.forEach((f) => f(x));
+  cfg.signal = entry.ctl.signal;
+  entry.job = run({ step: (t) => { entry.step = t; tell(t); }, eta: (ms) => { if (ms) { entry.eta = ms; tell({ eta: ms }); } } })
+    .catch((e) => { throw entry.ctl.signal.aborted ? new Error('Read cancelled.') : e; })
+    .finally(() => { if (inflight.get(key) === entry) inflight.delete(key); });
+  inflight.set(key, entry);
+  return entry;
+}
+const lines = (files) => files.reduce((n, f) => n + f.hunks.reduce((k, h) => k + h.lines.length, 0), 0);
+// About how long this reader takes: from its recent reads, the median time per diff line times this read's lines, never
+// under its quickest read; or its usual time while its tours don't record their size. Codebase tours use their own
+// usual time. ponytail: a median ratio plus a floor; fit overhead + rate if the estimates run off.
+const estimate = async (reader, n, repo) => estimateFrom(await db.timings(reader), n, repo);
+function estimateFrom(all, n, repo) {
+  const rows = all.filter((r) => (r.kind === 'repo') === repo && +r.ms > 0);
+  const median = (xs) => (xs.length ? xs.sort((a, b) => a - b)[xs.length >> 1] : null);
+  const rates = rows.filter((r) => +r.lines > 0).map((r) => r.ms / r.lines);
+  if (!repo && n && rates.length >= 2) return Math.round(Math.max(Math.min(...rows.map((r) => +r.ms)), median(rates) * n));
+  const whole = rows.filter((r) => !r.from).map((r) => +r.ms);
+  return whole.length >= 2 ? median(whole) : null;
+}
 
 // want: a reader whose saved tour of this commit to show instead of the chosen AI's (switching between tours to compare).
 async function story(ctx, ref, fresh, onStep, aiKey, want) {
@@ -370,16 +402,15 @@ async function story(ctx, ref, fresh, onStep, aiKey, want) {
     if (busy) return watch(busy, onStep);
   }
   if (inflight.has(key)) return watch(inflight.get(key), onStep);
-  const entry = { since: Date.now(), key: refKey(ref), title: pr.title, model: cfg.model || cfg.provider, by: ctx.user.id, step: '', listeners: new Set() };
-  const step = (t) => { entry.step = t; entry.listeners.forEach((f) => f(t)); };
-  const job = (async () => {
+  const entry = startRead(key, { key: refKey(ref), title: pr.title, by: ctx.user.id }, cfg, async ({ step, eta }) => {
     const t0 = Date.now(), local = MODE === 'local';
     // New commits on a toured PR: carry the old tour forward and read only what's new. Re-read (fresh) reads it all.
     const prev = !fresh && pr.since && !pr.since.rewritten ? await db.previousTour(ref, pr.sha) : null;
-    let s, model, from = null;
+    let s, model, from = null, n;
     if (prev?.data.anchors && prev.data.review) { // older tours lack anchors or a review: read those in full once
       const { tour, open, uncovered } = carry(prev.data, pr);
       step(`Reading the new commits with ${nice(cfg.model || cfg.provider)}`);
+      eta(await estimate(reader, (n = lines(pr.since.files)), false));
       const u = await ai.update(pr, tour, open, uncovered, cfg, { local });
       ({ model } = u);
       s = tour;
@@ -392,17 +423,16 @@ async function story(ctx, ref, fresh, onStep, aiKey, want) {
       from = prev.sha;
     } else {
       step(`Reading ${pr.files.length} ${pr.files.length === 1 ? 'file' : 'files'} with ${nice(cfg.model || cfg.provider)}`);
+      eta(await estimate(reader, (n = lines(pr.files)), false));
       ({ s, model } = await ai.analyse(pr, cfg, { local }));
     }
     step('Pinning the tour to the code');
     tidy(s, pr);
     s.anchors = anchorsOf(pr);
-    s.meta = { sha: pr.sha, provider: cfg.provider, model, ms: Date.now() - t0, at: new Date().toISOString(), ref: pr.ref, title: pr.title, state: pr.state, from };
+    s.meta = { sha: pr.sha, provider: cfg.provider, model, ms: Date.now() - t0, lines: n, at: new Date().toISOString(), ref: pr.ref, title: pr.title, state: pr.state, from };
     await db.putTour(ref, pr.sha, reader, s, ctx.user.id);
     return s;
-  })().finally(() => inflight.delete(key));
-  entry.job = job;
-  inflight.set(key, entry);
+  });
   return watch(entry, onStep);
 }
 
@@ -540,11 +570,10 @@ async function repoStory(ctx, ref, question, fresh, onStep, aiKey, want) {
   const q = question != null ? qnorm(question) : old?.data.meta?.question ?? '';
   if (qnum(q) !== ref.num) throw Object.assign(new Error('Start this tour again from the home page.'), { status: 400 });
   const title = q || `How ${info.name} works`;
-  const entry = { since: Date.now(), key: refKey(ref), title, model: cfg.model || cfg.provider, by: ctx.user.id, step: '', listeners: new Set() };
-  const step = (t) => { entry.step = t; entry.listeners.forEach((f) => f(t)); };
-  const job = (async () => {
+  const entry = startRead(key, { key: refKey(ref), title, by: ctx.user.id }, cfg, async ({ step, eta }) => {
     const t0 = Date.now();
     step(`Downloading ${info.name}`);
+    eta(await estimate(reader, 0, true));
     const dir = await snapshot(ctx.token, ref, info.sha);
     try {
       step(`Exploring the code with ${nice(cfg.model || cfg.provider)}`);
@@ -559,9 +588,7 @@ async function repoStory(ctx, ref, question, fresh, onStep, aiKey, want) {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
-  })().finally(() => inflight.delete(key));
-  entry.job = job;
-  inflight.set(key, entry);
+  });
   return watch(entry, onStep);
 }
 
@@ -806,6 +833,18 @@ async function handle(req, res) {
   // a comment every 15 seconds so proxies keep the connection open, and ends with the tour. The read itself runs on the
   // server regardless, so a dropped stream loses nothing: the browser reconnects and joins the same read.
   // It's a POST so the person's AI key travels in the body, never in a URL that could reach a log.
+  // Cancels this person's reads of a PR or codebase tour. Someone else's read that they joined keeps going.
+  if (u.pathname === '/api/story/cancel') {
+    if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+    if (!String(req.headers['content-type']).startsWith('application/json')) return send(res, 415, { error: 'Expected JSON' });
+    let b;
+    try { b = await body(req); } catch (e) { return send(res, 400, { error: e.message }); }
+    const ref = parseRef(String(b.pr || ''));
+    if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
+    const mine = [...inflight.entries()].filter(([k, e]) => k.startsWith(`${refKey(ref)}@`) && e.by === ctx.user.id);
+    for (const [k, e] of mine) { e.ctl.abort(); inflight.delete(k); }
+    return send(res, 200, { cancelled: mine.length });
+  }
   if (u.pathname === '/api/story/stream') {
     if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
     if (!String(req.headers['content-type']).startsWith('application/json')) return send(res, 415, { error: 'Expected JSON' });
@@ -822,7 +861,7 @@ async function handle(req, res) {
     res.write('retry: 3000\n\n');
     ev('progress', ref.num < 0 ? 'Fetching the repository' : 'Fetching the pull request');
     try {
-      const go = (t) => ev('progress', t), question = typeof b.question === 'string' ? b.question : null;
+      const go = (t) => (typeof t === 'string' ? ev('progress', t) : ev('eta', t.eta)), question = typeof b.question === 'string' ? b.question : null;
       const want = typeof b.reader === 'string' && /^[\w.:\/@-]{1,120}$/.test(b.reader) ? b.reader : null;
       const { anchors, ...s } = ref.num < 0 ? await repoStory(ctx, ref, question, b.fresh === true, go, aiKey, want) : await story(ctx, ref, b.fresh === true, go, aiKey, want); // anchors stay on the server
       s.readers = s.meta?.sha ? await db.readers(ref, s.meta.sha) : [];
@@ -905,6 +944,14 @@ console.assert(TEST.test('src/foo.test.ts') && TEST.test('tests/a.py') && !TEST.
 }
 console.assert(EMAIL.test('a.b+c@example.co.uk') && !EMAIL.test('a@b') && !EMAIL.test('a b@c.com') && !EMAIL.test('<x>@y.com') && !EMAIL.test('a@b..com'), 'waitlist email check');
 console.assert(parseRef('a/b/-12').num === -12 && parseRepo('https://github.com/A/B.git').repo === 'b' && parseRepo('a/b').owner === 'a' && !parseRepo('a/b/pull/1'), 'repo refs');
+{
+  // estimates: time per line from tours that record their size, never under the quickest; else the usual whole read
+  const t = (ms, lines, extra) => ({ ms: String(ms), lines: lines == null ? null : String(lines), kind: null, from: null, ...extra });
+  console.assert(estimateFrom([t(40000, 100), t(60000, 300), t(90000, 300)], 600, false) === 180000, 'eta per line');
+  console.assert(estimateFrom([t(40000, 100), t(60000, 300)], 10, false) === 40000, 'eta floor');
+  console.assert(estimateFrom([t(30000), t(50000), t(5000, null, { from: 'abc' })], 99, false) === 50000, 'eta without sizes skips updates');
+  console.assert(estimateFrom([t(30000)], 99, false) === null && estimateFrom([t(1, 1, { kind: 'repo' }), t(2, 1, { kind: 'repo' })], 0, true) === 2, 'eta needs two reads');
+}
 console.assert(qnum('How does  login work?') === qnum('how does login work?') && qnum('x') < 0 && qnum('x') !== qnum('y'), 'question keys');
 {
   // codebase tours: points pin to real lines inside padded, merged excerpts; unknown paths and lines drop their pin

@@ -83,7 +83,8 @@ Then add `DATABASE_URL=postgres://readthrough:readthrough@127.0.0.1:5433/readthr
    - or starts one.
 4. A new commit on a toured PR takes the incremental path: `carry()` re-pins the old tour to the new diff by matching line text, and `ai.update` reads only what's new. Otherwise it's a full read with `ai.analyse`.
 5. `tidy()` pins every point, finding and premortem item to real diff lines, and normalises chapters. `anchorsOf()` records the hunk text for the next incremental read. The tour is saved with `db.putTour`.
-6. The stream sends `progress` steps, a `: still reading` comment every 15 seconds (so proxies don't time out), and finally `done` (the tour without `anchors`) or `failed`.
+6. The stream sends `progress` steps, an `eta` (milliseconds, from this reader's recent reads: `estimate()`, which uses the `lines` each tour records), a `: still reading` comment every 15 seconds (so proxies don't time out), and finally `done` (the tour without `anchors`) or `failed`.
+7. `POST /api/story/cancel` aborts the person's own reads of a PR. Every provider gets the read's `AbortSignal` as `cfg.signal` (the CLIs are killed, requests aborted), and the stream ends with `failed: Read cancelled.`
 
 ### A codebase tour
 

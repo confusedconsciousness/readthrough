@@ -218,6 +218,10 @@ async function getTour(ref, sha, reader, exact = false) {
     order by (reader = $5) desc, created_at desc limit 1`, [...keyOf(ref), sha, reader]);
   return r ? json(r.data) : null;
 }
+// How long this reader's recent reads took, and how many diff lines each read: what a new read's estimate comes from.
+// ponytail: scans every tour by this reader (no index on reader); add one if the table grows large.
+const timings = (reader) => q(`select data->'meta'->>'ms' as ms, data->'meta'->>'lines' as lines, data->'meta'->>'kind' as kind, data->'meta'->>'from' as "from"
+  from tours where reader = $1 order by created_at desc limit 40`, [reader]);
 // Every AI that has toured this commit, oldest first, so a reader can switch between them and compare.
 const readers = (ref, sha) => q(`select reader, data->'meta'->>'provider' as provider, data->'meta'->>'model' as model, data->'meta'->>'at' as at
   from tours where owner = $1 and repo = $2 and num = $3 and sha = $4 order by at`, [...keyOf(ref), sha]);
@@ -270,6 +274,6 @@ async function recentTours(userId, reader, { q: text = '', limit = 10, offset = 
 
 module.exports = {
   init, seal, unseal, upsertUser, tokensOf, setTokens, createSession, sessionUser, deleteSession, pruneSessions,
-  getAI, setAI, getTour, readers, putTour, previousTour, toured, markOpened, recentTours, joinWaitlist, waitlist,
+  getAI, setAI, getTour, readers, timings, putTour, previousTour, toured, markOpened, recentTours, joinWaitlist, waitlist,
   end: () => (kind === 'pg' ? pool?.end() : lite?.close()),
 };
