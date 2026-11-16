@@ -442,7 +442,8 @@ async function story(ctx, ref, fresh, onStep, aiKey, want) {
 // with a negative number derived from the question, and the code the model points at becomes hunks of unchanged
 // lines, so the PR views draw it. The model reads a snapshot of the default branch (GitHub's tarball), unpacked
 // into a temporary folder that's removed after the read.
-const parseRepo = (s) => { const m = String(s || '').trim().match(/^(?:https?:\/\/)?(?:www\.)?(?:github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/); return m && { owner: m[1].toLowerCase(), repo: m[2].toLowerCase() }; };
+// owner/repo, or any GitHub link inside it (a PR, a file, a branch): the repository is what gets toured.
+const parseRepo = (s) => { const m = String(s || '').trim().match(/^(?:https?:\/\/)?(?:www\.)?(?:github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:[\/?#].*)?$/); return m && { owner: m[1].toLowerCase(), repo: m[2].toLowerCase() }; };
 const qnorm = (q) => String(q || '').trim().replace(/\s+/g, ' ').slice(0, 300);
 const qnum = (q) => -(parseInt(crypto.createHash('sha256').update(qnorm(q).toLowerCase()).digest('hex').slice(0, 7), 16) + 1);
 
@@ -943,7 +944,7 @@ console.assert(TEST.test('src/foo.test.ts') && TEST.test('tests/a.py') && !TEST.
   console.assert(t[1].row === 1 && t[1].side === 'LEFT' && t[2].hunk === '', 'threads: old line pins, outdated stays');
 }
 console.assert(EMAIL.test('a.b+c@example.co.uk') && !EMAIL.test('a@b') && !EMAIL.test('a b@c.com') && !EMAIL.test('<x>@y.com') && !EMAIL.test('a@b..com'), 'waitlist email check');
-console.assert(parseRef('a/b/-12').num === -12 && parseRepo('https://github.com/A/B.git').repo === 'b' && parseRepo('a/b').owner === 'a' && !parseRepo('a/b/pull/1'), 'repo refs');
+console.assert(parseRef('a/b/-12').num === -12 && parseRepo('https://github.com/A/B.git').repo === 'b' && parseRepo('a/b').owner === 'a' && parseRepo('https://github.com/A/b/pull/37').repo === 'b' && parseRepo('github.com/a/b.git/tree/main?x=1').repo === 'b' && !parseRepo('a') && !parseRepo('a b/c'), 'repo refs');
 {
   // estimates: time per line from tours that record their size, never under the quickest; else the usual whole read
   const t = (ms, lines, extra) => ({ ms: String(ms), lines: lines == null ? null : String(lines), kind: null, from: null, ...extra });
