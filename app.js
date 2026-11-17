@@ -486,17 +486,15 @@
   function pane(sel) {
     const { pr, story: s } = cur, d = done(), u = unread(pr, s), n = s.stops.length, D = depth();
     const risks = s.review ? bySeverity(s.review.findings.filter((f) => f.severity !== 'nit')).slice(0, 3) : [];
+    const asked = hasIntent(s) && `<span class="nw"><a data-sel="intent">${ic(VERDICT_IC[s.intent.verdict] || 'dot', VERDICT[s.intent.verdict][1])}${VERDICT[s.intent.verdict][0]}</a><span class="muted">${s.intent.items.length ? ` (${s.intent.items.filter((r) => r.status === 'met').length} of ${s.intent.items.length})` : ''}</span></span>`;
+    const verdict = s.review ? `<p class="verdict-row"><a data-sel="merge">${recIc(s.review.recommendation)}${REC[s.review.recommendation][0]}</a>${tally(s.review) ? `<span class="muted"> · ${tally(s.review)}</span>` : ''}${asked ? `<span class="muted"> · </span>${asked}` : ''}<a class="go-on" data-sel="merge">Open the review</a></p>` : asked ? `<p class="verdict-row">${asked}</p>` : '';
     if (sel === 'overview') return [
       `${heading(pr)}
        ${hasSince(pr) ? `<a class="banner" data-sel="since"><b>${pr.since.rewritten ? 'Rebased' : plural(pr.since.commits.length, 'new commit')}</b> since the last tour${pr.since.at ? `, ${ago(pr.since.at)} ago` : ''}<span>See what changed →</span></a>` : ''}
        <p class="lead">${prose(s.gist)}</p>
        ${s.goal ? `<p class="goal"><b>${pr.kind === 'repo' ? 'In short.' : 'Goal.'}</b> ${prose(s.goal)}</p>` : ''}
        ${s.story ? `<h2>How it fits together</h2><p class="story">${prose(s.story)}</p>` : ''}
-       ${s.review ? `<a class="glance" data-sel="merge">
-         <span class="glance-h">${recIc(s.review.recommendation)}<b>${REC[s.review.recommendation][0]}</b>${tally(s.review) ? `<span class="muted"> · ${tally(s.review)}</span>` : ''}<span class="glance-go">Open the review</span></span>
-         <span class="glance-dims">${dimsOf(s.review).map((x) => `<span class="gd" title="${esc(x.name)}: ${esc(GRADE[x.grade]?.[0] || '')}. ${esc(x.summary)}">${meter(x.grade)}<span>${x.name}</span></span>`).join('')}</span>
-       </a>` : ''}
-       ${hasIntent(s) ? `<p class="asked"><a data-sel="intent">${ic(VERDICT_IC[s.intent.verdict] || 'dot', VERDICT[s.intent.verdict][1])}${VERDICT[s.intent.verdict][0]}</a> <span class="muted">· ${s.intent.items.filter((r) => r.status === 'met').length} of ${s.intent.items.length} requirements met, from ${s.intent.source === 'issue' ? 'the linked issue' : 'the description'}</span></p>` : ''}
+       ${D === 'glance' ? verdict : ''}
        ${pr.comments?.length ? (() => { const old = pr.comments.filter((t) => !t.hunk); return `<p class="asked">${ic('discuss', 'muted')}<span>${plural(pr.comments.length, 'comment thread')} from reviewers, shown under their lines${old.length ? ` · ${old.length} on code that has changed since` : ''}</span></p>
          ${old.length ? `<details class="desc"><summary>Comments on code that has changed (${old.length})</summary>${old.map((t) => `<p class="th-where"><code>${esc(t.path)}</code></p>${threadHTML(t)}`).join('')}</details>` : ''}`; })() : ''}
        ${D === 'glance' && risks.length ? `<h2>Top risks</h2><ol class="risks">${risks.map((f) => `<li><span class="sev ${f.severity}">${SEV[f.severity][0]}</span><span>${prose(f.text)}</span></li>`).join('')}</ol>
@@ -504,6 +502,7 @@
        ${D === 'glance' ? '' : `<h2>${pr.kind === 'repo' ? 'Where to start' : 'Why'}</h2><p>${prose(s.why)}</p>
        ${s.changes.length ? `<h2>Behaviour</h2><table class="changes"><thead><tr><th>Before</th><th>After</th></tr></thead><tbody>${s.changes.map((c) => `<tr><td>${prose(c.before)}</td><td>${prose(c.after)}</td></tr>`).join('')}</tbody></table>` : ''}
        ${pr.kind === 'repo' ? '' : facts(pr) + desc(pr)}
+       ${verdict}
        <div class="actions"><button class="btn primary" data-sel="0">Start the tour <kbd>j</kbd></button></div>`}`,
       `${s.flow.nodes.length ? flowBlock(s) : ''}
        <div class="block"><div class="block-head"><h2>${pr.kind === 'repo' ? 'Files in the tour' : 'Files'}</h2></div>${files(pr, s)}</div>`,
@@ -526,7 +525,8 @@
       const chs = s.chapters.map((c) => { const fs = all.filter((f) => f.hunk && c.stops.includes(home.get(f.hunk))); ordered.push(...fs); return { c, fs }; });
       const wide = all.filter((f) => !ordered.includes(f)); ordered.push(...wide);
       const fs = numbered(ordered), num = new Map(ordered.map((f, i) => [f, i + 1]));
-      const fails = (s.premortem?.failures || []).filter((f) => D === 'deep' || f.likelihood !== 'unlikely').map((f, i) => ({ ...f, k: fs.length + i + 1 }));
+      const same = (f) => f.hunk && r.findings.some((x) => x.hunk === f.hunk && x.from === f.from && x.to === f.to);
+      const fails = (s.premortem?.failures || []).filter((f) => (D === 'deep' || f.likelihood !== 'unlikely') && !same(f)).map((f, i) => ({ ...f, k: fs.length + i + 1 }));
       const dims = dimsOf(r).filter((x) => D === 'deep' || x.grade !== 'good'), nits = r.findings.filter((f) => f.severity === 'nit').length;
       const items = (list) => `<ol class="points findings">${list.map((f) => findingItem({ ...f, k: num.get(f) })).join('')}</ol>`;
       return [
@@ -536,23 +536,20 @@
            <div class="rb-head">${recIc(r.recommendation)}<span><b>Readthrough</b> ${REC_SAYS[r.recommendation] || ''}</span>${tally(r) ? `<span class="rb-tally">${tally(r)}</span>` : ''}</div>
            <div class="rb-body"><p>${prose(r.summary)}</p></div>
          </div>
-         ${s.story ? `<h2>How it fits together</h2><p class="story">${prose(s.story)}</p>` : ''}
          ${D === 'glance' ? `<h2>Top risks</h2>${risks.length ? `<ol class="risks">${risks.map((f) => `<li><span class="sev ${f.severity}">${SEV[f.severity][0]}</span><span>${prose(f.text)}</span></li>`).join('')}</ol>` : '<p class="muted">Nothing stood out.</p>'}
            <div class="actions"><button class="btn primary" data-depth="review">See it chapter by chapter</button></div>` : `
-         <h2>Chapter by chapter</h2>
+         ${chs.length < 2 ? `<h2>Findings</h2>${ordered.length ? items(ordered) : '<p class="muted">Nothing to raise.</p>'}` : `<h2>Chapter by chapter</h2>
          ${chs.map(({ c, fs: cf }, ci) => { const [v, icon, tone] = chapterVerdict(cf); return `<section class="chap">
            <div class="chap-h"><span class="chap-n">${ci + 1}</span><b>${esc(c.title)}</b><span class="chap-v">${ic(icon, tone)}${v}</span><a class="chap-go" data-sel="${c.stops[0]}">${c.stops.length === 1 ? `Stop ${c.stops[0] + 1}` : `Stops ${c.stops[0] + 1}–${c.stops[c.stops.length - 1] + 1}`}</a></div>
-           ${c.summary ? `<p>${prose(c.summary)}</p>` : ''}
            ${cf.length ? items(cf) : ''}</section>`; }).join('')}
-         ${wide.length ? `<section class="chap"><div class="chap-h"><span class="chap-n">·</span><b>Across the whole PR</b></div>${items(wide)}</section>` : ''}
+         ${wide.length ? `<section class="chap"><div class="chap-h"><span class="chap-n">·</span><b>Across the whole PR</b></div>${items(wide)}</section>` : ''}`}
          ${D !== 'deep' && nits ? `<p class="more-depth"><button class="link" data-depth="deep">${plural(nits, 'nit')} in Deep</button></p>` : ''}
-         ${s.premortem?.failures?.length ? `<h2>Will it hold up?</h2>
-           <p class="small muted">Imagined three months after merging, at ten times today's traffic: the most plausible ways this causes an incident.</p>
+         ${fails.length ? `<h2>Will it hold up?</h2>
+           <p class="small muted">How it could fail at ten times today's traffic.</p>
            <ol class="points findings premortem">${fails.map(failureItem).join('')}</ol>
            ${s.premortem.unknowns?.length ? `<p class="unknowns"><b>What the diff can't show.</b> ${s.premortem.unknowns.map((x) => prose(x)).join(' ')}</p>` : ''}` : ''}
          ${dims.length ? `<h2>Scorecard</h2>
-         <table class="scorecard"><tbody>${dims.map((x) => `<tr title="${esc(x.q)}"><th>${x.name}</th><td class="m">${meter(x.grade)}<span class="grade ${x.grade}">${GRADE[x.grade]?.[0] || ''}</span></td><td class="sum">${prose(x.summary)}</td></tr>`).join('')}</tbody></table>
-         <p class="small muted">Graded from the diff, the description and linked issues, not the whole repository. Treat it as a second reviewer's notes, not a verdict.</p>` : ''}
+         <table class="scorecard"><tbody>${dims.map((x) => `<tr title="${esc(x.q)}"><th>${x.name}</th><td class="m">${meter(x.grade)}<span class="grade ${x.grade}">${GRADE[x.grade]?.[0] || ''}</span></td><td class="sum">${prose(x.summary)}</td></tr>`).join('')}</tbody></table>` : ''}
          ${s.stops.some(flagged) ? `<h2>Possibly unnecessary</h2><ul class="unneeded">${s.stops.map((st, i) => (flagged(st) ? `<li>${needIc(st.necessity.verdict)}<a data-sel="${i}">${i + 1}. ${esc(st.title)}</a> <span class="need-w">${NEED[st.necessity.verdict][0]}</span><p>${prose(st.necessity.reason)}</p></li>` : '')).join('')}</ul>` : ''}
          ${s.questions.length ? `<h2>Questions for the author</h2><ul class="questions">${s.questions.map((q) => `<li>${prose(q)}</li>`).join('')}</ul>` : ''}`}`,
         codeFor(pr, [...(D === 'glance' ? [] : fs), ...(D === 'glance' ? [] : fails)], []) || '<p class="code-empty">No finding is tied to a specific line.</p>',
