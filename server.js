@@ -373,17 +373,17 @@ function startRead(key, fields, cfg, run) {
   return entry;
 }
 const lines = (files) => files.reduce((n, f) => n + f.hunks.reduce((k, h) => k + h.lines.length, 0), 0);
-// About how long this reader takes: from its recent reads, the median time per diff line times this read's lines, never
-// under its quickest read; or its usual time while its tours don't record their size. Codebase tours use their own
-// usual time. ponytail: a median ratio plus a floor; fit overhead + rate if the estimates run off.
+// About how long this reader takes. A PR read: the median time per diff line of its recent reads that recorded their
+// size, times this read's lines, never under its quickest read. No sized read yet means no estimate: a read's time
+// follows its size, so a plain average of other PRs misleads. A codebase tour: the usual time of its last ones.
+// ponytail: a median ratio plus a floor; fit overhead + rate if the estimates run off.
 const estimate = async (reader, n, repo) => estimateFrom(await db.timings(reader), n, repo);
 function estimateFrom(all, n, repo) {
   const rows = all.filter((r) => (r.kind === 'repo') === repo && +r.ms > 0);
   const median = (xs) => (xs.length ? xs.sort((a, b) => a - b)[xs.length >> 1] : null);
+  if (repo) return rows.length >= 2 ? median(rows.map((r) => +r.ms)) : null;
   const rates = rows.filter((r) => +r.lines > 0).map((r) => r.ms / r.lines);
-  if (!repo && n && rates.length >= 2) return Math.round(Math.max(Math.min(...rows.map((r) => +r.ms)), median(rates) * n));
-  const whole = rows.filter((r) => !r.from).map((r) => +r.ms);
-  return whole.length >= 2 ? median(whole) : null;
+  return n && rates.length ? Math.round(Math.max(Math.min(...rows.map((r) => +r.ms)), median(rates) * n)) : null;
 }
 
 // want: a reader whose saved tour of this commit to show instead of the chosen AI's (switching between tours to compare).
@@ -406,13 +406,13 @@ async function story(ctx, ref, fresh, onStep, aiKey, want) {
     const t0 = Date.now(), local = MODE === 'local';
     // New commits on a toured PR: carry the old tour forward and read only what's new. Re-read (fresh) reads it all.
     const prev = !fresh && pr.since && !pr.since.rewritten ? await db.previousTour(ref, pr.sha) : null;
-    let s, model, from = null, n;
+    let s, model, from = null, n, used;
     if (prev?.data.anchors && prev.data.review) { // older tours lack anchors or a review: read those in full once
       const { tour, open, uncovered } = carry(prev.data, pr);
       step(`Reading the new commits with ${nice(cfg.model || cfg.provider)}`);
       eta(await estimate(reader, (n = lines(pr.since.files)), false));
       const u = await ai.update(pr, tour, open, uncovered, cfg, { local });
-      ({ model } = u);
+      ({ model, usage: used } = u);
       s = tour;
       s.since = u.s.since;
       const first = s.stops.length;
@@ -424,12 +424,12 @@ async function story(ctx, ref, fresh, onStep, aiKey, want) {
     } else {
       step(`Reading ${pr.files.length} ${pr.files.length === 1 ? 'file' : 'files'} with ${nice(cfg.model || cfg.provider)}`);
       eta(await estimate(reader, (n = lines(pr.files)), false));
-      ({ s, model } = await ai.analyse(pr, cfg, { local }));
+      ({ s, model, usage: used } = await ai.analyse(pr, cfg, { local }));
     }
     step('Pinning the tour to the code');
     tidy(s, pr);
     s.anchors = anchorsOf(pr);
-    s.meta = { sha: pr.sha, provider: cfg.provider, model, ms: Date.now() - t0, lines: n, at: new Date().toISOString(), ref: pr.ref, title: pr.title, state: pr.state, from };
+    s.meta = { sha: pr.sha, provider: cfg.provider, model, ms: Date.now() - t0, lines: n, usage: used, at: new Date().toISOString(), ref: pr.ref, title: pr.title, state: pr.state, from };
     await db.putTour(ref, pr.sha, reader, s, ctx.user.id);
     return s;
   });
@@ -578,12 +578,12 @@ async function repoStory(ctx, ref, question, fresh, onStep, aiKey, want) {
     const dir = await snapshot(ctx.token, ref, info.sha);
     try {
       step(`Exploring the code with ${nice(cfg.model || cfg.provider)}`);
-      const { s: raw, model } = await ai.exploreRepo(cfg, MODE === 'local', dir, { ...info, question: q }, step);
+      const { s: raw, model, usage: used } = await ai.exploreRepo(cfg, MODE === 'local', dir, { ...info, question: q }, step);
       step('Pinning the tour to the code');
       const base = { kind: 'repo', ref, url: info.url, title, author: ref.owner, state: 'repo', base: '', head: info.branch, sha: info.sha, question: q };
       const { s, pr } = repoTour(dir, raw, base);
       s.pr = pr;
-      s.meta = { sha: info.sha, provider: cfg.provider, model, ms: Date.now() - t0, at: new Date().toISOString(), ref, title, state: 'repo', kind: 'repo', question: q, from: null };
+      s.meta = { sha: info.sha, provider: cfg.provider, model, ms: Date.now() - t0, usage: used, at: new Date().toISOString(), ref, title, state: 'repo', kind: 'repo', question: q, from: null };
       await db.putTour(ref, info.sha, reader, s, ctx.user.id);
       return s;
     } finally {
@@ -950,9 +950,14 @@ console.assert(parseRef('a/b/-12').num === -12 && parseRepo('https://github.com/
   const t = (ms, lines, extra) => ({ ms: String(ms), lines: lines == null ? null : String(lines), kind: null, from: null, ...extra });
   console.assert(estimateFrom([t(40000, 100), t(60000, 300), t(90000, 300)], 600, false) === 180000, 'eta per line');
   console.assert(estimateFrom([t(40000, 100), t(60000, 300)], 10, false) === 40000, 'eta floor');
-  console.assert(estimateFrom([t(30000), t(50000), t(5000, null, { from: 'abc' })], 99, false) === 50000, 'eta without sizes skips updates');
-  console.assert(estimateFrom([t(30000)], 99, false) === null && estimateFrom([t(1, 1, { kind: 'repo' }), t(2, 1, { kind: 'repo' })], 0, true) === 2, 'eta needs two reads');
+  console.assert(estimateFrom([t(30000), t(50000)], 99, false) === null, 'no eta without sizes');
+  console.assert(estimateFrom([t(35000), t(191000, 437)], 437, false) === 191000, 'one sized read is enough');
+  console.assert(estimateFrom([t(1, 1, { kind: 'repo' })], 0, true) === null && estimateFrom([t(1, 1, { kind: 'repo' }), t(2, 1, { kind: 'repo' })], 0, true) === 2, 'codebase eta needs two reads');
 }
+console.assert(ai.addUsage({ in: 0, out: 0, cost: 0 }, 'claude-sonnet-5-5', { input_tokens: 1000, output_tokens: 2000 }).cost === 0.022
+  && ai.addUsage({ in: 0, out: 0, cost: 0 }, 'claude-haiku-5-5', { input_tokens: 200000 }).cost === 0.1
+  && ai.addUsage({ in: 0, out: 0, cost: 0 }, 'claude-new', { input_tokens: 5 }).cost === null
+  && ai.codexUsage('{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":30}}\nnot json').out === 30, 'read usage');
 console.assert(qnum('How does  login work?') === qnum('how does login work?') && qnum('x') < 0 && qnum('x') !== qnum('y'), 'question keys');
 {
   // codebase tours: points pin to real lines inside padded, merged excerpts; unknown paths and lines drop their pin

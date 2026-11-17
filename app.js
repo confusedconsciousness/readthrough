@@ -68,6 +68,14 @@
     return m < 60 ? `${Math.max(1, m | 0)}m` : m < 1440 ? `${(m / 60) | 0}h` : `${(m / 1440) | 0}d`;
   };
   const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  // What a read used: "52K tokens · $0.21". Claude Code's cost is its own count at API prices, which a plan isn't billed.
+  const used = (m) => {
+    const u = m.usage;
+    if (!u || !(u.in + u.out)) return '';
+    const k = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}K` : String(n));
+    const cost = u.cost > 0 ? ` · <span title="${m.provider === 'claude' ? "Claude Code's count at API prices. A Claude plan isn't billed per read." : 'At Anthropic API prices'}">$${u.cost < 0.01 ? u.cost.toFixed(3) : u.cost.toFixed(2)}</span>` : '';
+    return ` · <span title="${u.in.toLocaleString()} in, ${u.out.toLocaleString()} out">${k(u.in + u.out)} tokens</span>${cost}`;
+  };
   const base = (p) => p.split('/').pop();
   const pathHtml = (p) => {
     const i = p.lastIndexOf('/') + 1;
@@ -261,18 +269,7 @@
     status.innerHTML = '';
     homeData = { r: null, inbox: null, err: '', q: '', page: 0 };
     view.innerHTML = `<div class="home2"><header class="h-head"><h1>Pull requests</h1>
-      <form class="go h-search" autocomplete="off" role="search"><input name="pr" type="search" placeholder="Search tours and pull requests, or paste a PR link" aria-label="Search, or paste a pull request link" spellcheck="false"><kbd>/</kbd></form></header>
-      <form class="h-repo" autocomplete="off">
-        <p class="h-repo-t"><b>Tour a codebase</b><span class="muted">A guided read of a whole repository, or of the part you ask about. Takes a few minutes.</span></p>
-        <div class="h-repo-f">
-          <label><span>Repository</span><input name="repo" list="repo-list" placeholder="owner/repo or a GitHub link" spellcheck="false" required></label>
-          <label><span>Question <span class="muted">· optional</span></span><input name="q" placeholder="Leave empty to tour the whole codebase" spellcheck="false"></label>
-          <button class="btn primary">Start tour</button>
-        </div>
-        <p class="h-repo-ex"><span class="muted">Try</span>${['How is the code organised?', 'How does a request flow through it?', 'Where is data stored?'].map((q) => `<button type="button" data-ask="${q}">${q}</button>`).join('')}</p>
-        <p class="err" role="alert"></p>
-        <datalist id="repo-list"></datalist>
-      </form>
+      <form class="go h-search" autocomplete="off" role="search"><input name="pr" type="search" placeholder="Search, or paste a GitHub link" aria-label="Search tours, paste a pull request link, or type owner/repo to tour a codebase" aria-describedby="h-tip" spellcheck="false"><kbd>/</kbd><p class="h-tip" id="h-tip" aria-live="polite">${tipText('')}</p></form></header>
       <div id="home2"></div></div>`;
     renderHome();
     refreshRecent();
@@ -311,8 +308,6 @@
   function renderHome() {
     const box = $('#home2');
     if (!box) return;
-    const list = $('#repo-list'), repos = [...new Set([...(homeData.inbox?.review || []), ...(homeData.inbox?.mine || [])].map((x) => x.repo).concat((homeData.r?.tours || []).map((t) => t.key.replace(/\/-?\d+$/, ''))))];
-    if (list) list.innerHTML = repos.map((r) => `<option value="${esc(r)}">`).join('');
     const { r, inbox, err } = homeData;
     const q = homeData.q.trim().toLowerCase(), hit = (x) => !q || `${x.repo} #${x.num} ${x.title} ${x.author}`.toLowerCase().includes(q);
     const tours = r?.tours || [], reading = r?.reading || [], review = (inbox?.review || []).filter(hit), mine = (inbox?.mine || []).filter((x) => !x.tour && hit(x));
@@ -459,7 +454,7 @@
     status.innerHTML = `<span class="segs" aria-hidden="true">${s.stops.map((_, i) => `<i class="${d.has(i) ? 'on' : ''}${cur.sel === i ? ' here' : ''}"></i>`).join('')}</span>
       <span><b>${d.size}</b>/${n} understood</span>
       ${cur.pr.kind === 'repo' ? '' : u.hunks.length ? `<span class="warn">${plural(u.hunks.length, 'hunk')} unexplained</span>` : '<span>Every hunk explained</span>'}
-      <span class="muted">Read by ${readBy(s)} in ${clock(s.meta.ms)}${s.meta.from ? ` · <span title="Only the commits after ${esc(s.meta.from.slice(0, 7))} were read; the rest of the tour carried over">updated from <code>${esc(s.meta.from.slice(0, 7))}</code></span>` : ''} · <button class="link${stale() ? ' strong' : ''}" data-fresh title="Read the whole PR again with ${esc(reader())}">${stale() ? `Re-read with ${esc(reader())}` : 'Re-read all'}</button></span>
+      <span class="muted">Read by ${readBy(s)} in ${clock(s.meta.ms)}${used(s.meta)}${s.meta.from ? ` · <span title="Only the commits after ${esc(s.meta.from.slice(0, 7))} were read; the rest of the tour carried over">updated from <code>${esc(s.meta.from.slice(0, 7))}</code></span>` : ''} · <button class="link${stale() ? ' strong' : ''}" data-fresh title="Read the whole PR again with ${esc(reader())}">${stale() ? `Re-read with ${esc(reader())}` : 'Re-read all'}</button></span>
       <span class="keys"><kbd>j</kbd><kbd>k</kbd> move <kbd>x</kbd> understood <kbd>/</kbd> open</span>`;
   }
 
@@ -1272,24 +1267,6 @@
   // ---------- events ----------
 
   // The landing's waitlist form: one address, then a thank-you in place of the form.
-  // Tour a codebase: the server turns the repository and question into a tour key, then the PR view takes over.
-  document.addEventListener('submit', async (e) => {
-    if (!e.target.matches('.h-repo')) return;
-    e.preventDefault();
-    const f = e.target, err = $('.err', f), btn = $('button', f), q = f.elements.q.value.trim();
-    const pr = refOf(f.elements.repo.value); // a PR link means that PR, not the whole repository
-    if (pr) { location.hash = `#/${pr}`; return; }
-    err.textContent = '';
-    btn.disabled = true;
-    try {
-      const r = await api(`/api/repo?repo=${encodeURIComponent(f.elements.repo.value.trim())}&q=${encodeURIComponent(q)}`);
-      questions.set(r.key, q);
-      location.hash = `#/${r.key}`;
-    } catch (x) {
-      err.textContent = x.message;
-      btn.disabled = false;
-    }
-  });
   document.addEventListener('submit', async (e) => {
     if (!e.target.matches('.l-wait')) return;
     e.preventDefault();
@@ -1315,6 +1292,7 @@
     if (!e.target.matches('.go')) return;
     e.preventDefault();
     const input = e.target.elements.pr, key = refOf(input.value);
+    if (!key && e.target.matches('.h-search') && repoOf(input.value)) return tourRepo(input);
     if (!key && e.target.matches('.h-search')) { // not a link: open the only match, if there is exactly one
       const only = [...new Set([...document.querySelectorAll('#home2 a[href^="#/"]')].map((a) => a.getAttribute('href')))];
       if (only.length === 1) location.hash = only[0];
@@ -1325,6 +1303,40 @@
     location.hash = `#/${key}`;
   });
   document.addEventListener('input', (e) => e.target.setCustomValidity?.(''));
+  // The home box does everything: a PR link opens the PR (at once when pasted), "owner/repo" or a repository link, with
+  // an optional question after it, tours that codebase on Enter, and anything else searches. The line under the box
+  // says which it will be.
+  const repoOf = (v) => {
+    const [first, ...rest] = String(v).trim().split(/\s+/);
+    const repo = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?(?:[\/?#].*)?$/.exec(first)?.[1] || /^[\w.-]+\/[\w.-]+$/.exec(first)?.[0];
+    return repo && !refOf(v) ? { repo: repo.replace(/\.git$/, ''), q: rest.join(' ') } : null;
+  };
+  function tipText(v) {
+    const pr = refOf(v), t = repoOf(v);
+    if (pr) return `Enter opens <b>${esc(pr.replace(/\/(\d+)$/, '#$1'))}</b>`;
+    if (t) return `Enter tours the <b>${esc(t.repo)}</b> codebase${t.q ? `, on “${esc(t.q)}”` : '. Add a question after it to tour one part'}. Takes a few minutes.`;
+    return 'Type <b>owner/repo</b> to tour a codebase, with a question after it if you have one.';
+  }
+  async function tourRepo(input) {
+    const t = repoOf(input.value), tip = $('#h-tip');
+    tip.classList.remove('bad');
+    tip.textContent = `Starting the tour of ${t.repo}…`;
+    try {
+      const r = await api(`/api/repo?repo=${encodeURIComponent(t.repo)}&q=${encodeURIComponent(t.q)}`);
+      questions.set(r.key, t.q);
+      location.hash = `#/${r.key}`;
+    } catch (x) {
+      tip.classList.add('bad');
+      tip.textContent = x.message;
+    }
+  }
+  document.addEventListener('input', (e) => {
+    if (!e.target.matches?.('.h-search input')) return;
+    const key = e.inputType === 'insertFromPaste' && refOf(e.target.value);
+    if (key) { e.target.value = ''; location.hash = `#/${key}`; return; }
+    $('#h-tip').classList.remove('bad');
+    $('#h-tip').innerHTML = tipText(e.target.value);
+  });
   // Home search: filters as you type (tours on the server, so every page is searched); a pasted PR link still opens on Enter.
   let searchTimer;
   document.addEventListener('input', (e) => {
@@ -1334,8 +1346,6 @@
   });
 
   document.addEventListener('click', (e) => {
-    const ask = e.target.closest('[data-ask]');
-    if (ask) { const q = ask.form.elements.q; q.value = ask.dataset.ask; q.focus(); return; }
     if (e.target.closest?.('[data-menu]')) e.target.closest?.('details')?.removeAttribute('open');
     if (e.target.closest?.('[data-signout]')) return signOut();
     const jump = e.target.closest?.('[data-jump]');
