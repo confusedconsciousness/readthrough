@@ -1277,6 +1277,8 @@
     if (!e.target.matches('.h-repo')) return;
     e.preventDefault();
     const f = e.target, err = $('.err', f), btn = $('button', f), q = f.elements.q.value.trim();
+    const pr = refOf(f.elements.repo.value); // a PR link means that PR, not the whole repository
+    if (pr) { location.hash = `#/${pr}`; return; }
     err.textContent = '';
     btn.disabled = true;
     try {
