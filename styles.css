@@ -229,12 +229,12 @@ body[data-view="home"] .top .go { visibility: hidden; }
 /* ---------- note ---------- */
 
 .note .kicker { font-size: 12px; color: var(--fg-3); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
-.note .title { font-size: 17px; line-height: 1.35; font-weight: 600; letter-spacing: -0.005em; margin-bottom: 10px; text-wrap: balance; }
+.note .title { font: 600 21px/1.28 var(--display); letter-spacing: -0.015em; margin-bottom: 10px; text-wrap: balance; }
 .note .byline { color: var(--fg-2); font-size: 12px; margin-bottom: 18px; line-height: 1.7; }
 .note .byline code { font-size: 11px; }
-.note h2 { font-size: 12px; font-weight: 600; margin: 22px 0 6px; color: var(--fg); }
-.note p, .note li { font-size: 13.5px; line-height: 1.6; color: var(--fg); }
-.note .lead { font-size: 14.5px; line-height: 1.55; }
+.note h2 { font: 600 15px/1.3 var(--display); letter-spacing: -0.005em; margin: 28px 0 8px; color: var(--fg); }
+.note p, .note li { font-size: 14px; line-height: 1.6; color: var(--fg); }
+.note .lead { font-size: 15.5px; line-height: 1.55; text-wrap: pretty; }
 .note > p + p { margin-top: 10px; }
 .note code { font-size: 11.5px; }
 .story p { text-wrap: pretty; }
@@ -452,7 +452,7 @@ marker path { fill: var(--line-2); }
 
 /* ---------- since last tour, intent check, effort ---------- */
 
-.banner { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; margin: -4px 0 16px; padding: 9px 12px; border: 1px solid var(--blue); border-radius: 6px; background: var(--blue-bg); color: var(--fg); font-size: 13px; }
+.banner { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; margin: -4px 0 16px; padding: 9px 12px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--bg-2); color: var(--fg); font-size: 13px; }
 .banner:hover { text-decoration: none; }
 .banner span { margin-left: auto; color: var(--blue); font-weight: 500; white-space: nowrap; }
 .commits { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 6px; }
@@ -762,7 +762,7 @@ body[data-view="landing"] .account .signin { border-color: var(--line-2); }
 .tour .row .c .ic { width: 14px; height: 14px; }
 @media (max-width: 860px) { .tour .row .c { display: none; } } /* the strip shows stop numbers only */
 
-.goal { margin: -4px 0 14px; font-size: 13.5px; color: var(--fg-2); }
+.goal { margin: 12px 0 0; font-size: 14px; color: var(--fg-2); }
 .goal b { color: var(--fg); }
 .need-line, .verify, .verdict-line { display: flex; gap: 8px; align-items: flex-start; }
 .need-line .ic, .verify .ic, .verdict-line .ic { margin-top: 3px; }
@@ -770,7 +770,8 @@ body[data-view="landing"] .account .signin { border-color: var(--line-2); }
 .need-line b, .verify b { color: var(--fg); }
 .verify { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .verdict-line { font-size: 14px; margin: -2px 0 8px; }
-.asked { margin: -2px 0 6px; font-size: 13px; }
+.asked { display: flex; gap: 8px; align-items: flex-start; margin: 14px 0 6px; font-size: 13px; color: var(--fg-2); }
+.asked > .ic { margin-top: 2px; }
 .asked a { display: inline-flex; gap: 6px; align-items: center; color: var(--fg); font-weight: 500; }
 .pt-why { display: block; margin-top: 2px; font-size: 12.5px; color: var(--fg-2); }
 .pt-why::before { content: "Why: "; font-weight: 600; color: var(--fg-3); }
@@ -996,7 +997,7 @@ body:not([data-depth="deep"]) .pt-why { display: none; }
 body[data-depth="glance"] .flowblock + .block { display: none; }
 
 /* the review as a narrative: story, chapters with their own findings, the pre-mortem */
-.story { font-size: 15px; line-height: 1.65; }
+.story { line-height: 1.65; }
 .chap { margin: 0 0 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; }
 .chap > p { margin: 8px 0 0; color: var(--fg-2); font-size: 13.5px; line-height: 1.55; }
 .chap .findings { margin-top: 12px; }
