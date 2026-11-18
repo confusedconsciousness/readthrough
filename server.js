@@ -603,6 +603,16 @@ async function recent(ctx, params) {
     const s = r.data;
     return { key: `${r.owner}/${r.repo}/${r.num}`, title: s.meta.title || null, state: s.meta.state || null, gist: s.gist, flow: s.flow, stops: s.stops.length, model: s.meta.model, sha: s.meta.sha, at: s.meta.at, rec: s.review?.recommendation || null };
   });
+  // A tour stores the PR's state when it was read; ask GitHub for today's, one aliased query for the page.
+  const prs = rows.filter((r) => r.num > 0);
+  if (prs.length) {
+    const query = `{ ${prs.map((r, i) => `p${i}: repository(owner: ${JSON.stringify(r.owner)}, name: ${JSON.stringify(r.repo)}) { pullRequest(number: ${+r.num}) { state isDraft } }`).join(' ')} }`;
+    const data = await gh(ctx.token, 'graphql', { method: 'POST', body: { query } }).then((j) => j.data || {}, () => ({}));
+    prs.forEach((r, i) => {
+      const p = data[`p${i}`]?.pullRequest;
+      if (p) tours[rows.indexOf(r)].state = p.state === 'OPEN' ? (p.isDraft ? 'draft' : 'open') : p.state.toLowerCase();
+    });
+  }
   const reading = [...inflight.values()].filter((x) => x.by === ctx.user.id).map(({ since, key, title, model }) => ({ key, since, title, model }));
   return { tours, reading, total, page, per: PER_PAGE };
 }
