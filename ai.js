@@ -1,6 +1,7 @@
 // The reading: the prompt and schema every provider gets, and the providers themselves.
 // Hosted: the user's own API key (Anthropic through the official SDK, or any OpenAI-compatible API).
 // Local mode only: the Claude Code and Codex CLIs with the subscription logins on this machine.
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -678,6 +679,134 @@ async function exploreRepo(cfg, local, dir, meta, onStep) {
   return { anthropic: exploreAnthropic, claude: exploreClaudeCode, codex: exploreCodex }[cfg.provider](cfg, dir, meta, onStep);
 }
 
+// ---------- questions about a PR ----------
+
+// A conversation about one PR. Every question sends the same context first (the PR and its tour), then the earlier
+// turns, then the new question. The context doesn't change between questions, so each provider caches it: the
+// Anthropic API through cache markers, Claude Code through its system prompt, OpenAI and Codex by matching the prefix.
+// The first question pays for reading the PR; a follow-up reads it from the cache, at about a tenth of the price.
+const ASK = `You answer an engineer's questions about one pull request. You have its description, linked issues, commits and full diff, and the tour Readthrough wrote of it.
+
+Every answer has the same shape, and nothing else:
+1. The answer, in one sentence. For a yes or no question, start with "Yes." or "No.". If the question rests on a wrong premise, say so here.
+2. Then, only if the answer needs support, up to 4 lines that start with "- ". Each is one fact under 20 words and ends with the hunk id it rests on, like f2h1 (the reader's screen turns it into a link to that code).
+3. Last, only when the diff can't settle it, one line that starts with "Check: " and says what to look at outside the diff.
+
+Keep the whole answer under 100 words. Go longer only when the question asks for a walkthrough or a full list, and then use more "- " lines, not paragraphs.
+- Never guess at code you can't see.
+- Plain words and short sentences. Identifiers in \`backticks\`. No headings, bold, tables, code blocks or extra paragraphs.
+- No em or en dashes. No opener that praises the question, no closing summary, no restating the question.`;
+
+function askContext(pr, tour) {
+  const out = [prompt(pr)];
+  if (tour) {
+    out.push('', "Readthrough's tour of this PR, written earlier:", `Gist: ${tour.gist}`, `Story: ${tour.story || ''}`, 'Stops:',
+      ...tour.stops.map((st, i) => `${i + 1}. ${st.title}: ${st.summary ?? ''}`));
+    if (tour.review?.findings?.length) out.push('Review findings:', ...tour.review.findings.map((f) => `- [${f.severity}] ${f.text}${f.hunk ? ` (${f.hunk})` : ''}`));
+  }
+  return out.join('\n');
+}
+// The earlier turns as text, for the CLIs, which take one message.
+const transcript = (history) => (history.length ? `The conversation so far:\n\n${history.map((m) => `${m.role === 'user' ? 'Question' : 'Your answer'}: ${m.text}`).join('\n\n')}\n\nNew question: ` : '');
+const turns = (history, question) => [...history.map((m) => ({ role: m.role, content: m.text })), { role: 'user', content: question }];
+
+async function chatAnthropic(cfg, c) {
+  const model = cfg.model || 'claude-sonnet-5-5', client = new Anthropic({ apiKey: cfg.key, timeout: 10 * 60_000, maxRetries: 2 });
+  let msg;
+  try {
+    msg = await client.messages.stream({
+      model, max_tokens: 16000, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' },
+      system: [{ type: 'text', text: ASK }, { type: 'text', text: c.context, cache_control: { type: 'ephemeral' } }],
+      messages: turns(c.history, c.question),
+      cache_control: { type: 'ephemeral' }, // also caches the conversation so far, for the next question
+    }, { signal: cfg.signal }).finalMessage();
+  } catch (e) { throw anthropicError(e, model); }
+  if (msg.stop_reason === 'refusal') throw new Error('Claude declined to answer this.');
+  const text = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+  return { text, model: msg.model || model, usage: addUsage(usage(0, 0, 0), msg.model || model, msg.usage) };
+}
+
+// The context goes in the system prompt, which Claude Code caches; resuming a session instead cost more in testing.
+// The file keeps a large diff off the command line, and the fixed working folder keeps the cached prefix identical.
+async function chatClaude(cfg, c) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'readthrough-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'system.txt'), `${ASK}\n\n${c.context}`);
+    const out = JSON.parse(await run('claude', [
+      '-p', '--output-format', 'json', '--model', cfg.model || 'claude-sonnet-5-5', '--effort', 'medium',
+      '--tools', '', '--setting-sources', '', '--strict-mcp-config', '--no-session-persistence', '--system-prompt-file', path.join(dir, 'system.txt'),
+    ], { input: transcript(c.history) + c.question, timeout: 10 * 60_000, cwd: os.tmpdir(), signal: cfg.signal }).catch((e) => { throw claudeError(e.message); }));
+    if (out.is_error || !out.result) throw claudeError(out.result || 'Claude returned no answer');
+    return { text: out.result.trim(), model: topModel(out) || cfg.model, usage: claudeUsage(out) };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Codex puts its working folder in the prompt, so one fixed empty folder keeps the prefix the same between questions.
+async function chatCodex(cfg, c) {
+  const dir = path.join(os.tmpdir(), 'readthrough-ask'), out = path.join(dir, `${crypto.randomUUID()}.txt`);
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    const log = await run('codex', ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only', '-o', out, ...codexModel(cfg.model), '-'],
+      { input: `${ASK}\n\n${c.context}\n\n${transcript(c.history)}${c.question}`, timeout: 10 * 60_000, cwd: dir, signal: cfg.signal });
+    return { text: fs.readFileSync(out, 'utf8').trim(), model: cfg.model || 'Codex default', usage: codexUsage(log) };
+  } finally {
+    fs.rmSync(out, { force: true });
+  }
+}
+
+// An OpenAI-compatible API (LM Studio's too). OpenAI caches a repeated prompt prefix on its own.
+// ponytail: not streamed, so a local model slower than five minutes to answer times out; stream it like viaLMStudio if so.
+async function chatOpenAI(cfg, c, base, key, name) {
+  const r = await fetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), 'content-type': 'application/json' },
+    body: JSON.stringify({ model: cfg.model, messages: [{ role: 'system', content: `${ASK}\n\n${c.context}` }, ...turns(c.history, c.question)] }),
+    signal: until(cfg, 10 * 60_000),
+  }).catch(() => { throw new Error(`Couldn't reach ${name}.`); });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401) throw new Error(`${name} rejected your key. Check it in Settings.`);
+  if (!r.ok) throw new Error(j.error?.message || `${name} answered ${r.status}`);
+  const text = j.choices?.[0]?.message?.content;
+  if (!text) throw new Error(`${name} returned no answer.`);
+  return { text: text.trim(), model: j.model || cfg.model, usage: usage(j.usage?.prompt_tokens, j.usage?.completion_tokens, name === 'LM Studio' ? 0 : null) };
+}
+
+// Ollama keeps the last prompt's work while the model stays loaded, and a new num_ctx reloads it: so the window grows
+// in steps of 16K rather than with every question.
+async function chatOllama(cfg, c) {
+  const fail = localFail('Ollama', OLLAMA, 'ollama serve');
+  const messages = [{ role: 'system', content: `${ASK}\n\n${c.context}` }, ...turns(c.history, c.question)];
+  const r = await fetch(`${OLLAMA}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: cfg.model, stream: true, messages, options: { num_ctx: Math.min(131072, Math.ceil((JSON.stringify(messages).length / 3 + 8192) / 16384) * 16384) } }),
+    signal: until(cfg, 30 * 60_000),
+  }).catch((e) => { throw fail(e); });
+  if (!r.ok) throw new Error(r.status === 404 ? `Ollama doesn't have ${cfg.model}. Run \`ollama pull ${cfg.model}\`, or pick a model you have.` : `Ollama answered ${r.status}`);
+  let text = '', model = cfg.model, used;
+  try {
+    for await (const line of lines(r.body)) {
+      const j = JSON.parse(line);
+      if (j.error) throw new Error(`Ollama: ${j.error}`);
+      text += j.message?.content || '';
+      if (j.done) { model = j.model || model; used = usage(j.prompt_eval_count, j.eval_count, 0); }
+    }
+  } catch (e) { throw fail(e); }
+  return { text: text.trim(), model, usage: used };
+}
+
+// c: { context, history: [{ role, text }], question }. Returns { text, model, usage }.
+async function chat(cfg, local, c) {
+  const p = PROVIDERS[cfg.provider];
+  if (!p || (!p.hosted && !local)) throw new Error('Pick an AI in Settings before asking.');
+  if (p.key && !cfg.key) throw new Error(`Add your ${p.label} key in Settings to ask questions.`);
+  if (cfg.provider === 'openai') return chatOpenAI(cfg, c, cfg.baseURL || 'https://api.openai.com/v1', cfg.key, 'The API');
+  if (cfg.provider === 'lmstudio') return chatOpenAI(cfg, c, `${LMSTUDIO}/v1`, null, 'LM Studio');
+  return { anthropic: chatAnthropic, claude: chatClaude, codex: chatCodex, ollama: chatOllama }[cfg.provider](cfg, c);
+}
+
 // The models each local AI offers, for the Settings picker: [] when it isn't running, and the form takes a typed name.
 // Codex's catalogue comes from its own CLI (under a second, so it's kept); Ollama and LM Studio are asked each time.
 let codexList = null;
@@ -697,4 +826,4 @@ const installed = {};
 for (const cmd of ['claude', 'codex']) execFile(cmd, ['--version'], (err) => { installed[cmd] = !err; });
 
 module.exports = {
-  addUsage, codexUsage, models, analyse, update, exploreRepo, repoTools, PROVIDERS, installed, SCHEMA, UPDATE_SCHEMA, REPO_SCHEMA };
+  addUsage, codexUsage, models, analyse, update, exploreRepo, chat, askContext, repoTools, PROVIDERS, installed, SCHEMA, UPDATE_SCHEMA, REPO_SCHEMA };

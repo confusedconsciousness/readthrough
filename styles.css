@@ -213,7 +213,9 @@ body[data-view="home"] .top .go { visibility: hidden; }
 .tour .row .t { flex: 1; min-width: 0; }
 .tour .row .n { display: none; }
 .tour .row .c { margin-left: auto; padding-left: 8px; font-size: 11px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
-.tour .group { margin: 14px 8px 4px; font-size: 11px; font-weight: 600; color: var(--fg-3); }
+/* Two levels: a section (Stops, Check, Ask) is a small capitalised label under a rule; a chapter inside Stops is a
+   quiet label of its own. Neither outweighs the rows it introduces. */
+.tour .group { margin: 16px 8px 6px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3); }
 .mark { flex: none; width: 12px; height: 12px; margin-top: 2px; border-radius: 50%; border: 1.5px solid var(--line-2); display: grid; place-items: center; }
 .tour .row.sel .mark { border-color: var(--blue); }
 .tour .row.done .mark { background: var(--green); border-color: var(--green); }
@@ -1018,7 +1020,8 @@ body[data-depth="glance"] .flowblock + .block { display: none; }
 .pm-row > span:first-child { color: var(--fg-3); }
 .unknowns { margin: 10px 0 0; font-size: 13px; line-height: 1.55; color: var(--fg-2); }
 .unknowns b { color: var(--fg); font-weight: 600; }
-.tour .group.chap-g { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--fg-2); }
+.tour .group.chap-g { margin: 10px 8px 2px; padding-top: 0; border-top: 0; text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 500; color: var(--fg-3); }
+.tour .group + .group.chap-g { margin-top: 4px; }
 
 /* map lanes and the card that explains a box */
 .lane-band rect { fill: var(--bg-2); stroke: var(--line); }
@@ -1058,3 +1061,25 @@ body[data-depth="glance"] .flowblock + .block { display: none; }
 .l-wait-note a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
 .l-wait-done { display: flex; gap: 10px; align-items: flex-start; max-width: 440px; margin: 0; font-size: 15px; line-height: 1.5; color: var(--fg); }
 @media (max-width: 520px) { .l-wait { grid-template-columns: minmax(0, 1fr); } }
+
+/* Ask: conversations about the PR. Questions sit to the right in a quiet box; answers read like the rest of the pane. */
+.chats { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 18px; }
+.chats button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; height: 26px; padding: 0 10px; border: 1px solid var(--line-2); border-radius: 13px; background: var(--bg); color: var(--fg-2); font-size: 12.5px; }
+.chats button:hover { color: var(--fg); }
+.chats button.on { border-color: var(--blue); background: var(--blue-bg); color: var(--fg); }
+.convo { display: flex; flex-direction: column; gap: 16px; }
+.convo .q { align-self: flex-end; max-width: 85%; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-2); font-size: 14px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.convo .a > p, .convo .a li { margin: 0 0 8px; }
+.convo .a ul { margin: 0 0 8px; padding-left: 20px; }
+.convo .a > .a-lead { font-size: 15px; font-weight: 500; color: var(--fg); }
+.convo .a > .verify { margin: 4px 0 8px; padding-top: 10px; font-size: 13.5px; color: var(--fg-2); }
+.convo .a .a-meta { margin: 2px 0 0; font-size: 12px; color: var(--fg-3); }
+.convo .a .a-wait { font-size: 13px; }
+.ask-form { position: sticky; bottom: -48px; margin: 20px -24px -48px; padding: 12px 24px 20px; border-top: 1px solid var(--line); background: var(--bg); }
+.ask-form textarea { display: block; width: 100%; box-sizing: border-box; min-height: 64px; resize: vertical; padding: 9px 11px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg); color: var(--fg); font: inherit; font-size: 14px; line-height: 1.5; }
+.ask-form textarea:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-bg); }
+.ask-form textarea:disabled { opacity: 0.6; }
+.ask-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; margin-top: 8px; }
+.ask-btns { display: flex; align-items: center; gap: 14px; margin-left: auto; }
+.ask-btns .link { font-size: 12.5px; color: var(--fg-3); }
+@media (max-width: 860px) { .ask-form { bottom: 27px; margin: 20px -16px -8px; padding: 12px 16px 14px; } } /* above the sticky status bar */

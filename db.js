@@ -1,4 +1,5 @@
-// Storage: users and their sessions, per-user AI settings, tours, and which PRs each user has opened.
+// Storage: users and their sessions, per-user AI settings, tours, which PRs each user has opened, and the
+// conversations each person has about a PR.
 // Postgres when DATABASE_URL is set; otherwise SQLite in a single file (node:sqlite, built into Node).
 // The queries are written once for both: times are ISO-8601 text made in JS, JSON is stored as text,
 // and nothing Postgres-only (DISTINCT ON, = ANY, make_interval) is used.
@@ -65,7 +66,19 @@ create table if not exists waitlist (
   email text primary key,
   note text,
   created_at timestamptz not null default now()
-);`;
+);
+create table if not exists chats (
+  id text primary key,
+  user_id bigint not null references users on delete cascade,
+  owner text not null,
+  repo text not null,
+  num int not null,
+  title text not null,
+  messages jsonb not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists chats_pr on chats (user_id, owner, repo, num, updated_at desc);`;
 
 const LITE_SCHEMA = `
 create table if not exists users (
@@ -117,7 +130,19 @@ create table if not exists waitlist (
   email text primary key,
   note text,
   created_at text not null
-);`;
+);
+create table if not exists chats (
+  id text primary key,
+  user_id integer not null references users (id) on delete cascade,
+  owner text not null,
+  repo text not null,
+  num integer not null,
+  title text not null,
+  messages text not null,
+  created_at text not null,
+  updated_at text not null
+);
+create index if not exists chats_pr on chats (user_id, owner, repo, num, updated_at desc);`;
 
 // Returns which store is in use. A DATABASE_URL that can't be reached is an error, never a quiet switch to SQLite:
 // that would split a team's data between two databases.
@@ -272,8 +297,27 @@ async function recentTours(userId, reader, { q: text = '', limit = 10, offset = 
   return { total: Number(rows[0]?.total || 0), rows: rows.map((r) => ({ ...r, data: json(r.data) })) };
 }
 
+// ---------- conversations about a PR ----------
+
+// Each person's own: every query is scoped to the user, so nobody reads, changes or deletes another person's.
+const chatOf = (r) => r && { id: r.id, owner: r.owner, repo: r.repo, num: +r.num, title: r.title, messages: json(r.messages), at: iso(r.updated_at) };
+async function getChat(userId, id) {
+  const [r] = await q('select * from chats where id = $1 and user_id = $2', [id, userId]);
+  return chatOf(r) || null;
+}
+async function listChats(userId, ref) {
+  const rows = await q(`select id, title, updated_at from chats where user_id = $1 and owner = $2 and repo = $3 and num = $4
+    order by updated_at desc limit 50`, [userId, ...keyOf(ref)]);
+  return rows.map((r) => ({ id: r.id, title: r.title, at: iso(r.updated_at) }));
+}
+const putChat = (userId, c) => q(`insert into chats (id, user_id, owner, repo, num, title, messages, created_at, updated_at)
+  values ($1, $2, $3, $4, $5, $6, $7, $8, $8) on conflict (id) do update set messages = $7, updated_at = $8 where chats.user_id = $2`,
+[c.id, userId, c.owner, c.repo, c.num, c.title, JSON.stringify(c.messages), now()]);
+const deleteChat = (userId, id) => q('delete from chats where id = $1 and user_id = $2', [id, userId]);
+
 module.exports = {
   init, seal, unseal, upsertUser, tokensOf, setTokens, createSession, sessionUser, deleteSession, pruneSessions,
   getAI, setAI, getTour, readers, timings, putTour, previousTour, toured, markOpened, recentTours, joinWaitlist, waitlist,
+  getChat, listChats, putChat, deleteChat,
   end: () => (kind === 'pg' ? pool?.end() : lite?.close()),
 };

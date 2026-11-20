@@ -41,25 +41,31 @@
         const provider = (await cfgP?.catch(() => null))?.provider;
         const r = await fetch('/api/story/stream', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pr: key, fresh: !!fresh && !again, key: store.get(`key:${provider}`, ''), question: questions.get(key), reader: picks.get(key) }) });
         if (!r.ok) return reject(new Error((await r.json().catch(() => ({}))).error || r.statusText));
-        const rd = r.body.pipeThrough(new TextDecoderStream()).getReader();
-        for (let buf = '', i; ;) {
-          const { value, done } = await rd.read();
-          if (done) break;
-          buf += value;
-          while ((i = buf.indexOf('\n\n')) >= 0) {
-            const block = buf.slice(0, i), name = /^event: (.*)$/m.exec(block)?.[1], data = /^data: (.*)$/m.exec(block)?.[1];
-            buf = buf.slice(i + 2);
-            if (name === 'progress') { misses = 0; onStep(JSON.parse(data)); }
-            if (name === 'eta') onStep({ eta: JSON.parse(data) });
-            if (name === 'done') return resolve(JSON.parse(data));
-            if (name === 'failed') return reject(new Error(JSON.parse(data).error));
-          }
-        }
-      } catch {}
+        const d = await events(r, (x) => { if (typeof x === 'string') misses = 0; onStep(x); });
+        if (d !== undefined) return resolve(d);
+      } catch (e) { if (e.failed) return reject(e); }
       if (++misses >= 3) reject(new Error(LOST)); else setTimeout(() => connect(true), 2000 * misses);
     };
     connect(false);
   });
+  // Reads a Server-Sent Events body: steps and estimates go to onStep, and it settles on done (with its data) or failed
+  // (an error marked failed). A stream that ends without either resolves undefined, so a read can reconnect.
+  async function events(r, onStep) {
+    const rd = r.body.pipeThrough(new TextDecoderStream()).getReader();
+    for (let buf = '', i; ;) {
+      const { value, done } = await rd.read();
+      if (done) return undefined;
+      buf += value;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, i), name = /^event: (.*)$/m.exec(block)?.[1], data = /^data: (.*)$/m.exec(block)?.[1];
+        buf = buf.slice(i + 2);
+        if (name === 'progress') onStep(JSON.parse(data));
+        if (name === 'eta') onStep({ eta: JSON.parse(data) });
+        if (name === 'done') return JSON.parse(data);
+        if (name === 'failed') throw Object.assign(new Error(JSON.parse(data).error), { failed: true });
+      }
+    }
+  }
   // A new step: the status bar and the sidebar line say it straight away.
   const stepUI = () => { bar(); const t = $('.tour .tm-step'); if (t && cur?.step) t.textContent = cur.step; };
   const clock = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
@@ -377,7 +383,8 @@
   function tour() {
     const { pr, story: s, serr } = cur;
     const sinceRow = hasSince(pr) ? `<a class="row" data-sel="since">Since last tour<span class="c new">${pr.since.rewritten ? 'rebased' : `${pr.since.commits.length} new`}</span></a>` : '';
-    if (!s) return `${sinceRow}<a class="row" data-sel="overview">Overview</a>
+    const askRow = pr.kind === 'repo' || cur.demo ? '' : `<p class="group">Ask</p><a class="row" data-sel="ask">Ask about this PR${talk().chats?.length ? `<span class="c">${talk().chats.length}</span>` : ''}</a>`;
+    if (!s) return `${sinceRow}<a class="row" data-sel="overview">Overview</a>${askRow}
       ${serr ? (serr === CANCELLED ? '<p class="tour-msg">Read cancelled.<br><button class="link" data-fresh>Read it</button></p>' : `<p class="tour-msg bad">The tour couldn't be written.<br><button class="link" data-fresh>Try again</button></p>`)
         : `<p class="tour-msg"><span class="tm-step">${cur.step ? esc(cur.step) : pr.toured && !pr.reading ? 'Opening the saved tour' : pr.kind === 'repo' ? 'Exploring the repository' : `Reading ${plural(pr.files.length, 'file')}`}</span> · ${timer()}${reading() ? ' · <button class="link" data-cancel>Cancel</button>' : ''}</p>${progress()}`}`;
     const d = done(), ix = index(pr), u = unread(pr, s);
@@ -386,14 +393,15 @@
       ? `<a class="row fold" data-depth="review">${plural(s.stops.length, 'stop')}<span class="c">Walk them in Review</span></a>`
       : (s.chapters?.length ? s.chapters : [{ title: 'Stops', stops: s.stops.map((_, i) => i) }]).map((c, ci) => `${ci || s.chapters?.length ? `<p class="group chap-g">${esc(c.title)}</p>` : ''}${c.stops.map((i) => [s.stops[i], i]).map(([st, i]) => `<a class="row stop${d.has(i) ? ' done' : ''}" data-sel="${i}"><span class="mark" aria-hidden="true"></span><span class="n">${i + 1}</span><span class="t">${esc(st.title)}</span>${flagged(st) ? `<span class="c" title="${esc(NEED[st.necessity.verdict][0])}: ${esc(st.necessity.reason)}">${needIc(st.necessity.verdict)}</span>` : `<span class="c" title="lines changed">${size(st) || ''}</span>`}</a>`).join('')}`).join('');
     return `${depthBar()}${sinceRow}<a class="row" data-sel="overview">Overview</a>
-      ${s.chapters?.length && depth() !== 'glance' ? '' : '<p class="group">Stops</p>'}
+      <p class="group">Stops</p>
       ${stopRows}
       <p class="group">Check</p>
       ${hasIntent(s) ? `<a class="row" data-sel="intent">Does it do what was asked?<span class="c">${ic(VERDICT_IC[s.intent.verdict] || 'dot', VERDICT[s.intent.verdict]?.[1] || '')}${VERDICT[s.intent.verdict]?.[2] || ''}</span></a>` : ''}
       ${u.hunks.length || u.files.length ? `<a class="row" data-sel="unread">Unexplained<span class="c warn">${u.hunks.length + u.files.length}</span></a>` : ''}
       ${pr.kind === 'repo' ? `<a class="row" data-sel="merge">Risks<span class="c">${s.premortem?.failures?.length || ''}</span></a>`
         : s.review ? `<a class="row" data-sel="merge">Review<span class="c">${recIc(s.review.recommendation)}${REC[s.review.recommendation]?.[2] || ''}</span></a>`
-        : `<a class="row" data-sel="merge">Before merging<span class="c">${s.checks?.length || ''}</span></a>`}`;
+        : `<a class="row" data-sel="merge">Before merging<span class="c">${s.checks?.length || ''}</span></a>`}
+      ${askRow}`;
   }
 
   // Swap the two content panes and the selection; the tour list keeps its scroll.
@@ -404,13 +412,14 @@
     if (cur.sel === 'auto') cur.sel = hasSince(pr) ? 'since' : 'overview';
     // Until the tour arrives the overview stands in, but cur.sel keeps the deep link. The since view needs only the PR.
     let sel = cur.sel;
-    if (sel === 'since' ? !hasSince(pr) : !s || (typeof sel === 'number' && !s.stops[sel]) || (sel === 'intent' && !hasIntent(s))) sel = 'overview';
+    if (sel === 'ask' ? pr.kind === 'repo' || cur.demo : sel === 'since' ? !hasSince(pr) : !s || (typeof sel === 'number' && !s.stops[sel]) || (sel === 'intent' && !hasIntent(s))) sel = 'overview';
     document.querySelectorAll('.l-steps [data-sel]').forEach((b) => { b.classList.toggle('on', b.dataset.sel === String(sel)); b.setAttribute('aria-pressed', b.dataset.sel === String(sel)); });
-    const [note, code] = sel === 'since' ? sincePane() : s ? pane(sel) : waiting();
+    const [note, code] = sel === 'ask' ? askPane() : sel === 'since' ? sincePane() : s ? pane(sel) : waiting();
     $('#note').innerHTML = note;
     $('#code').innerHTML = diffBar() + code;
     if (sel === 'overview' && s) paintView(); else stopPlay();
     $('#note').scrollTop = $('#code').scrollTop = 0;
+    if (sel === 'ask') askShown();
     $$('.tour [data-sel]').forEach((a) => a.classList.toggle('sel', a.dataset.sel === String(sel)));
     if (!cur.demo) $('.tour .sel')?.scrollIntoView({ block: 'nearest' });
     bar();
@@ -620,6 +629,128 @@
   const numbered = (points) => (points || []).map((pt, k) => ({ ...pt, k: k + 1 }));
   const pointList = (pts) => (pts.length ? `<ol class="points">${pts.map((pt) => `<li${pt.hunk ? ` data-pt="${pt.k}" tabindex="0"` : ''}><span class="pn">${pt.k}</span><span class="pt-t">${prose(pt.text)}${pt.why ? `<span class="pt-why">${prose(pt.why)}</span>` : ''}</span>${pt.hunk ? `<span class="pt-at">${esc(loc(pt.hunk, pt.from))}</span>` : ''}</li>`).join('')}</ol>` : '');
   const codeFor = (pr, pts, ids) => [...new Set([...pts.map((pt) => pt.hunk).filter(Boolean), ...ids])].map((id) => hunkById(pr, id, pts.filter((pt) => pt.hunk === id))).join('');
+
+  // ---------- ask: conversations about the PR ----------
+
+  // Kept with the PR's memo, so leaving the PR and coming back keeps the conversation and an answer on its way.
+  // chat: undefined until the list loads (then the newest), null for a new conversation, else the open conversation.
+  const talk = () => (memo.get(cur.key).ask ||= { chats: null, chat: undefined, asking: null, err: null, draft: '' });
+  const pendingAsk = new Map(); // key → a question typed after the PR link on the home page
+
+  // Answers come in one shape (see ASK in ai.js): the answer in a sentence, then "- " points, then a "Check:" line.
+  // The first sentence stands out, points are a list, and the check reads like a stop's "Verify yourself". Older or
+  // looser answers still render: other paragraphs stay paragraphs. Hunk ids become links to the code beside it.
+  function answer(t) {
+    let html = '', list = [], first = true;
+    const flush = () => { if (list.length) html += `<ul>${list.map((l) => `<li>${prose(l)}</li>`).join('')}</ul>`; list = []; };
+    const para = (p) => {
+      const check = /^check:\s*(.*)/i.exec(p);
+      html += check ? `<p class="verify">${ic('task', 'muted')}<span><b>Check.</b> ${prose(check[1])}</span></p>` : `<p${first ? ' class="a-lead"' : ''}>${prose(p)}</p>`;
+      first = false;
+    };
+    for (const block of String(t).replace(/\*\*(.+?)\*\*/g, '$1').trim().split(/\n\s*\n/)) {
+      const lines = [];
+      for (const l of block.split('\n')) {
+        const m = /^\s*(?:[-*•]|\d+[.)])\s+(.*)/.exec(l);
+        if (m) { if (lines.length) para(lines.splice(0).join(' ')); list.push(m[1]); first = false; } else if (/^check:/i.test(l.trim())) { flush(); if (lines.length) para(lines.splice(0).join(' ')); para(l.trim()); } else { flush(); lines.push(l.trim()); }
+      }
+      if (lines.length) para(lines.join(' '));
+      flush();
+    }
+    return html;
+  }
+
+  function askPane() {
+    const { pr } = cur, t = talk(), c = t.chat, msgs = c?.messages || [];
+    if (!t.chats) loadChats();
+    const pick = t.chats?.length ? `<div class="chats" role="group" aria-label="Conversations"><button type="button" data-chat="" class="${c ? '' : 'on'}" aria-pressed="${!c}">+ New</button>${t.chats.map((x) => `<button type="button" data-chat="${esc(x.id)}" class="${c?.id === x.id ? 'on' : ''}" aria-pressed="${c?.id === x.id}" title="${esc(x.title)}">${esc(x.title)}</button>`).join('')}</div>` : '';
+    const thread = msgs.map((m) => (m.role === 'user' ? `<div class="q">${esc(m.text)}</div>`
+      : `<div class="a">${answer(m.text)}<p class="a-meta">${esc(pretty(m.model))}${m.ms ? ` · ${clock(m.ms)}` : ''}${used(m)}</p></div>`)).join('');
+    const waitingFor = t.asking ? `<div class="q">${esc(t.asking.text)}</div><div class="a"><p class="muted a-wait"><span class="a-step">${esc(t.asking.step || 'Sending')}</span> · <span class="elapsed" data-since="${t.asking.t0}">${clock(Date.now() - t.asking.t0)}</span></p></div>` : '';
+    const empty = !msgs.length && !t.asking ? `<p class="muted">Ask anything about this PR: why a change is there, what a function does, what could break. Answers point at the code they rest on.</p>` : '';
+    const ids = [...new Set(msgs.filter((m) => m.role === 'assistant').flatMap((m) => m.text.match(/\bf\d+h\d+\b/g) || []))].filter((id) => index(pr).has(id));
+    return [
+      `<h1 class="title">Ask about this PR</h1>
+       ${pick}${empty}
+       <div class="convo">${thread}${waitingFor}</div>
+       ${t.err ? `<div class="notice bad"><p>${prose(t.err)}</p><div class="row-end"><button class="btn" data-settings>Settings</button></div></div>` : ''}
+       <form class="ask-form"><label class="sr" for="ask-q">${msgs.length ? 'Ask a follow-up' : 'Your question'}</label>
+         <textarea id="ask-q" rows="3" placeholder="${msgs.length ? 'Ask a follow-up' : 'Ask a question about this PR'}" ${t.asking ? 'disabled' : ''}>${esc(t.draft)}</textarea>
+         <div class="ask-foot"><span class="small muted">${msgs.length ? 'Follow-ups reuse the PR already read, so they cost less.' : 'The first question reads the PR. Follow-ups reuse it and cost less.'}</span>
+           <span class="ask-btns">${c ? '<button type="button" class="link quiet" data-chat-del>Delete</button>' : ''}<button class="btn primary" ${t.asking ? 'disabled' : ''}>Ask <kbd>↵</kbd></button></span></div></form>`,
+      ids.length ? ids.map((id) => hunkById(pr, id)).join('') : '<p class="code-empty">The code an answer points at shows here.</p>',
+    ];
+  }
+  // After drawing: the latest turn in view, the box ready, and a question from the home page asked.
+  function askShown() {
+    const t = talk(), q = pendingAsk.get(cur.key), note = $('#note');
+    note.scrollTop = note.scrollHeight;
+    if (!t.asking) $('#ask-q')?.focus({ preventScroll: true });
+    if (q && !t.asking) { pendingAsk.delete(cur.key); t.chat = null; ask(q); }
+  }
+  const askRedraw = (key) => {
+    if (cur?.key !== key) return;
+    if ($('.tour')) $('.tour').innerHTML = tour(); // the conversation count
+    if (cur.sel === 'ask') show();
+  };
+
+  async function loadChats(pickNewest = true) {
+    const key = cur.key, t = talk();
+    if (t.loading) return;
+    t.loading = true;
+    try {
+      t.chats = (await api(`/api/chats?pr=${key}`)).chats;
+      if (pickNewest && t.chat === undefined) t.chat = t.chats[0] ? await api(`/api/chat?id=${encodeURIComponent(t.chats[0].id)}`) : null;
+    } catch (e) { t.chats = t.chats || []; t.err = e.message; }
+    t.loading = false;
+    askRedraw(key);
+  }
+  async function openChat(id) {
+    const key = cur.key, t = talk();
+    t.err = null;
+    try { t.chat = id ? await api(`/api/chat?id=${encodeURIComponent(id)}`) : null; } catch (e) { t.err = e.message; }
+    askRedraw(key);
+  }
+  async function ask(text) {
+    const key = cur.key, t = talk(), q = text.trim();
+    if (!q || t.asking) return;
+    Object.assign(t, { asking: { text: q, step: '', t0: Date.now() }, err: null, draft: '' });
+    askRedraw(key);
+    try {
+      const provider = (await cfgP?.catch(() => null))?.provider;
+      const r = await fetch('/api/ask', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pr: key, id: t.chat?.id || null, text: q, key: store.get(`key:${provider}`, '') }) }).catch(() => { throw new Error(LOST); });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      const chat = await events(r, (s) => { if (typeof s !== 'string') return; t.asking.step = s; if (cur?.key === key) { const el = $('.a-step'); if (el) el.textContent = s; } });
+      if (!chat) throw new Error(LOST);
+      t.chat = chat;
+      t.chats = [{ id: chat.id, title: chat.title, at: chat.at }, ...(t.chats || []).filter((x) => x.id !== chat.id)];
+    } catch (e) {
+      Object.assign(t, { err: e.message, draft: q });
+    }
+    t.asking = null;
+    askRedraw(key);
+  }
+  async function deleteChat() {
+    const key = cur.key, t = talk(), c = t.chat;
+    if (!c || !confirm(`Delete the conversation "${c.title}"? This can't be undone.`)) return;
+    try {
+      await fetch('/api/chat/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: c.id }) }).then((r) => { if (!r.ok) throw new Error(r.statusText); });
+      t.chats = t.chats.filter((x) => x.id !== c.id);
+      t.chat = null;
+    } catch (e) { t.err = e.message; }
+    askRedraw(key);
+  }
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest?.('[data-chat],[data-chat-del]');
+    if (!b || !cur) return;
+    if ('chatDel' in b.dataset) deleteChat(); else openChat(b.dataset.chat);
+  });
+  document.addEventListener('submit', (e) => {
+    if (!e.target.matches('.ask-form')) return;
+    e.preventDefault();
+    ask($('#ask-q').value);
+  });
+  document.addEventListener('input', (e) => { if (e.target.id === 'ask-q' && cur) talk().draft = e.target.value; });
 
   // Only the commits pushed since the last tour. The diff comes straight from GitHub, so it shows before any read.
   function sincePane() {
@@ -1304,7 +1435,8 @@
   document.addEventListener('submit', (e) => {
     if (!e.target.matches('.go')) return;
     e.preventDefault();
-    const input = e.target.elements.pr, key = refOf(input.value);
+    const input = e.target.elements.pr, key = refOf(input.value), q = key && e.target.matches('.h-search') ? afterLink(input.value) : '';
+    if (q) { pendingAsk.set(key, q); input.value = ''; input.blur(); location.hash = `#/${key}/ask`; return; }
     if (!key && e.target.matches('.h-search') && repoOf(input.value)) return tourRepo(input);
     if (!key && e.target.matches('.h-search')) { // not a link: open the only match, if there is exactly one
       const only = [...new Set([...document.querySelectorAll('#home2 a[href^="#/"]')].map((a) => a.getAttribute('href')))];
@@ -1316,9 +1448,10 @@
     location.hash = `#/${key}`;
   });
   document.addEventListener('input', (e) => e.target.setCustomValidity?.(''));
-  // The home box does everything: a PR link opens the PR (at once when pasted), "owner/repo" or a repository link, with
-  // an optional question after it, tours that codebase on Enter, and anything else searches. The line under the box
-  // says which it will be.
+  // The home box does everything: a PR link opens the PR, and with a question after it asks that question about the PR;
+  // "owner/repo" or a repository link, with an optional question after it, tours that codebase; anything else searches.
+  // All on Enter. The line under the box says which it will be.
+  const afterLink = (v) => String(v).trim().split(/\s+/).slice(1).join(' ');
   const repoOf = (v) => {
     const [first, ...rest] = String(v).trim().split(/\s+/);
     const repo = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?(?:[\/?#].*)?$/.exec(first)?.[1] || /^[\w.-]+\/[\w.-]+$/.exec(first)?.[0];
@@ -1326,7 +1459,7 @@
   };
   function tipText(v) {
     const pr = refOf(v), t = repoOf(v);
-    if (pr) return `Enter opens <b>${esc(pr.replace(/\/(\d+)$/, '#$1'))}</b>`;
+    if (pr) return `Enter opens <b>${esc(pr.replace(/\/(\d+)$/, '#$1'))}</b>${afterLink(v) ? ' and asks your question about it' : '. Add a question after the link to ask about it'}.`;
     if (t) return `Enter tours the <b>${esc(t.repo)}</b> codebase${t.q ? `, on “${esc(t.q)}”` : '. Add a question after it to tour one part'}. Takes a few minutes.`;
     return 'Type <b>owner/repo</b> to tour a codebase, with a question after it if you have one.';
   }
@@ -1345,8 +1478,6 @@
   }
   document.addEventListener('input', (e) => {
     if (!e.target.matches?.('.h-search input')) return;
-    const key = e.inputType === 'insertFromPaste' && refOf(e.target.value);
-    if (key) { e.target.value = ''; location.hash = `#/${key}`; return; }
     $('#h-tip').classList.remove('bad');
     $('#h-tip').innerHTML = tipText(e.target.value);
   });
@@ -1387,6 +1518,7 @@
 
   document.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey || dlg.open) return;
+    if (e.target.id === 'ask-q' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); e.target.form.requestSubmit(); return; }
     if (e.target.closest?.('input,textarea')) { if (e.key === 'Escape') e.target.blur(); return; }
     if (e.key === '/') { e.preventDefault(); ($('.home2 .go input') || $('#pr-input')).focus(); return; }
     if (e.key === 'Enter' && e.target.matches?.('.node.link')) return select(+e.target.dataset.sel);
@@ -1533,6 +1665,8 @@
   console.assert(refOf('a/b#3') === 'a/b/3' && refOf('a/b') === null, 'refOf short');
   console.assert(prose('use `x<y`') === 'use <code>x&lt;y</code>', 'prose escapes');
   console.assert(clock(72000) === '1:12', 'clock');
+  console.assert(answer('No. It only reads `x`.\n- First point f9h9\n- Second\nCheck: the caller.') === '<p class="a-lead">No. It only reads <code>x</code>.</p><ul><li>First point f9h9</li><li>Second</li></ul><p class="verify">' + ic('task', 'muted') + '<span><b>Check.</b> the caller.</span></p>', 'answer shape');
+  console.assert(answer('One.\n\nTwo.') === '<p class="a-lead">One.</p><p>Two.</p>', 'answer paragraphs');
   console.assert(JSON.stringify(pairs([[' '], ['-'], ['-'], ['+'], [' '], ['+']])) === '[{"l":0,"r":0},{"l":1,"r":3},{"l":2,"r":null},{"l":4,"r":4},{"l":null,"r":5}]', 'split pairs');
   console.assert(colored('<span class="hljs-keyword">if</span> x &lt; 1') && !colored('<img src=x onerror=alert(1)>') && !colored('<span onclick="x">a</span>'), 'colored');
   console.assert(effort(5, 3, 1) === 1 && effort(88, 22, 5) === 2 && effort(300, 50, 10) === 3 && effort(3932, 232, 27) === 5, 'effort');

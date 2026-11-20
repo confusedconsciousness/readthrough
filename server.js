@@ -595,6 +595,37 @@ async function repoStory(ctx, ref, question, fresh, onStep, aiKey, want) {
 
 // Home page: this user's reads in progress, and the latest tour of each PR they've opened.
 const PER_PAGE = 6; // about one screen of tours in every home layout
+// ---------- questions about a PR ----------
+
+// A question in a conversation about a PR (a new conversation when id is empty). The PR is fetched again each time, so
+// answers follow new commits, and its tour goes along when there is one. Answers aren't streamed: a conversation takes
+// one question at a time, and the browser shows the steps until the answer arrives.
+// ponytail: the last 20 messages go with each question; summarise older ones if long conversations need them.
+const asking = new Set();
+async function askChat(ctx, ref, id, text, aiKey, step) {
+  const question = String(text || '').trim().slice(0, 4000);
+  if (!question) throw Object.assign(new Error('Type a question first.'), { status: 400 });
+  const old = id ? await db.getChat(ctx.user.id, String(id)) : null;
+  if (id && (!old || refKey(old) !== refKey(ref))) throw Object.assign(new Error('That conversation was deleted.'), { status: 404 });
+  const chat = old || { id: crypto.randomBytes(12).toString('base64url'), ...ref, title: question.replace(/\s+/g, ' ').slice(0, 80), messages: [] };
+  if (asking.has(chat.id)) throw new Error('Wait for the answer to your last question.');
+  asking.add(chat.id);
+  try {
+    step('Fetching the pull request');
+    const pr = await loadPR(ctx, ref); // also the access check
+    const cfg = await aiConfig(ctx.user, aiKey), tour = await db.getTour(ref, pr.sha, readerOf(cfg));
+    step(chat.messages.length ? `Asking ${nice(cfg.model || cfg.provider)}` : `Reading the PR with ${nice(cfg.model || cfg.provider)}`);
+    const t0 = Date.now();
+    const r = await ai.chat(cfg, MODE === 'local', { context: ai.askContext(pr, tour), history: chat.messages.slice(-20).map(({ role, text: t }) => ({ role, text: t })), question });
+    const at = new Date().toISOString();
+    chat.messages.push({ role: 'user', text: question, at }, { role: 'assistant', text: r.text, provider: cfg.provider, model: r.model, usage: r.usage, ms: Date.now() - t0, at });
+    await db.putChat(ctx.user.id, chat);
+    return { ...chat, at };
+  } finally {
+    asking.delete(chat.id);
+  }
+}
+
 async function recent(ctx, params) {
   const cfg = await aiConfig(ctx.user);
   const text = String(params.get('q') || '').slice(0, 200), page = Math.min(Math.max(0, parseInt(params.get('page'), 10) || 0), 1000);
@@ -726,6 +757,19 @@ function body(req) {
     req.on('data', (c) => { b += c; if (b.length > 10_000) { reject(new Error('Request too large')); req.destroy(); } });
     req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { reject(new Error('Expected JSON')); } });
   });
+}
+
+// A Server-Sent Events response: ev(name, data) sends an event, a comment every 15 seconds keeps proxies from closing
+// a long wait, and end() finishes it.
+function events(req, res) {
+  res.writeHead(200, { ...BASE_HEADERS, 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
+  const beat = setInterval(() => { if (!res.writableEnded) res.write(': still reading\n\n'); }, 15_000);
+  req.on('close', () => clearInterval(beat));
+  res.write('retry: 3000\n\n');
+  return {
+    ev: (name, data) => { if (!res.writableEnded) res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`); },
+    end: () => { clearInterval(beat); res.end(); },
+  };
 }
 
 const page = (title, text) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
@@ -865,11 +909,7 @@ async function handle(req, res) {
     if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
     const aiKey = typeof b.key === 'string' ? b.key.trim() : '';
     if (aiKey.length > 500) return send(res, 400, { error: 'That key is too long.' });
-    res.writeHead(200, { ...BASE_HEADERS, 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
-    const ev = (name, data) => { if (!res.writableEnded) res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`); };
-    const beat = setInterval(() => { if (!res.writableEnded) res.write(': still reading\n\n'); }, 15_000);
-    req.on('close', () => clearInterval(beat));
-    res.write('retry: 3000\n\n');
+    const { ev, end } = events(req, res);
     ev('progress', ref.num < 0 ? 'Fetching the repository' : 'Fetching the pull request');
     try {
       const go = (t) => (typeof t === 'string' ? ev('progress', t) : ev('eta', t.eta)), question = typeof b.question === 'string' ? b.question : null;
@@ -880,8 +920,28 @@ async function handle(req, res) {
     } catch (e) {
       ev('failed', { error: e.message });
     } finally {
-      clearInterval(beat);
-      res.end();
+      end();
+    }
+    return;
+  }
+  // A question about a PR, streamed the same way: steps, then the whole conversation with its answer.
+  if (u.pathname === '/api/ask' || u.pathname === '/api/chat/delete') {
+    if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+    if (!String(req.headers['content-type']).startsWith('application/json')) return send(res, 415, { error: 'Expected JSON' });
+    let b;
+    try { b = await body(req); } catch (e) { return send(res, 400, { error: e.message }); }
+    if (u.pathname === '/api/chat/delete') { await db.deleteChat(ctx.user.id, String(b.id || '')); return send(res, 200, { ok: true }); }
+    const ref = parseRef(String(b.pr || ''));
+    if (!ref || ref.num < 0) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
+    const aiKey = typeof b.key === 'string' ? b.key.trim() : '';
+    if (aiKey.length > 500) return send(res, 400, { error: 'That key is too long.' });
+    const { ev, end } = events(req, res);
+    try {
+      ev('done', await askChat(ctx, ref, b.id, b.text, aiKey, (t) => ev('progress', t)));
+    } catch (e) {
+      ev('failed', { error: e.message });
+    } finally {
+      end();
     }
     return;
   }
@@ -895,6 +955,16 @@ async function handle(req, res) {
     return send(res, 200, { key: `${ref.owner}/${ref.repo}/${qnum(u.searchParams.get('q'))}`, name: info.name });
   }
   if (u.pathname === '/api/recent') return send(res, 200, await recent(ctx, u.searchParams));
+  // This person's conversations about a PR, newest first, and one of them in full.
+  if (u.pathname === '/api/chats') {
+    const ref = parseRef(u.searchParams.get('pr'));
+    if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
+    return send(res, 200, { chats: await db.listChats(ctx.user.id, ref) });
+  }
+  if (u.pathname === '/api/chat') {
+    const c = await db.getChat(ctx.user.id, String(u.searchParams.get('id') || ''));
+    return c ? send(res, 200, c) : send(res, 404, { error: 'That conversation was deleted.' });
+  }
   if (u.pathname === '/api/pr') {
     const ref = parseRef(u.searchParams.get('pr'));
     if (!ref) return send(res, 400, { error: 'Expected a PR like github.com/owner/repo/pull/123' });
@@ -963,6 +1033,10 @@ console.assert(parseRef('a/b/-12').num === -12 && parseRepo('https://github.com/
   console.assert(estimateFrom([t(30000), t(50000)], 99, false) === null, 'no eta without sizes');
   console.assert(estimateFrom([t(35000), t(191000, 437)], 437, false) === 191000, 'one sized read is enough');
   console.assert(estimateFrom([t(1, 1, { kind: 'repo' })], 0, true) === null && estimateFrom([t(1, 1, { kind: 'repo' }), t(2, 1, { kind: 'repo' })], 0, true) === 2, 'codebase eta needs two reads');
+}
+{ // a question carries the PR first, then the tour it was read with
+  const c = ai.askContext({ title: 'T', author: 'a', head: 'h', base: 'main', body: '', commits: [], files: [] }, { gist: 'G', story: '', stops: [{ title: 'S1', summary: 'one' }], review: { findings: [{ severity: 'major', text: 'F', hunk: 'f0h0' }] } });
+  console.assert(c.startsWith('Title: T') && c.includes('1. S1: one') && c.includes('- [major] F (f0h0)'), 'ask context');
 }
 console.assert(ai.addUsage({ in: 0, out: 0, cost: 0 }, 'claude-sonnet-5-5', { input_tokens: 1000, output_tokens: 2000 }).cost === 0.022
   && ai.addUsage({ in: 0, out: 0, cost: 0 }, 'claude-haiku-5-5', { input_tokens: 200000 }).cost === 0.1

@@ -67,6 +67,26 @@ async function check(label, opts) {
   const page2 = await db.recentTours(u.id, 'claude-sonnet', { offset: 10 });
   assert.equal(page2.rows.length, 0); assert.equal(page2.total, 1); // a page past the end is empty but still knows the total
 
+  // conversations: saved and extended in place, listed newest first, and private to the person who started them
+  const other = await db.upsertUser({ id: gid + 1, login: 'other' });
+  const c = { id: `c${gid}`, ...ref, title: 'Why 8 km?', messages: [{ role: 'user', text: 'q' }, { role: 'assistant', text: 'a' }] };
+  await db.putChat(u.id, c);
+  await new Promise((r) => setTimeout(r, 5));
+  await db.putChat(u.id, { id: `d${gid}`, ...ref, title: 'Second', messages: [] });
+  c.messages.push({ role: 'user', text: 'q2' }, { role: 'assistant', text: 'a2' });
+  await new Promise((r) => setTimeout(r, 5));
+  await db.putChat(u.id, c);
+  assert.deepEqual((await db.getChat(u.id, c.id)).messages.map((m) => m.text), ['q', 'a', 'q2', 'a2']);
+  assert.deepEqual((await db.listChats(u.id, ref)).map((x) => x.title), ['Why 8 km?', 'Second']);
+  assert.equal(await db.getChat(other.id, c.id), null);
+  assert.deepEqual(await db.listChats(other.id, ref), []);
+  await db.putChat(other.id, { ...c, messages: [] }); // same id, someone else: changes nothing
+  assert.equal((await db.getChat(u.id, c.id)).messages.length, 4);
+  await db.deleteChat(other.id, c.id);
+  assert.ok(await db.getChat(u.id, c.id));
+  await db.deleteChat(u.id, c.id);
+  assert.equal(await db.getChat(u.id, c.id), null);
+
   assert.equal(db.unseal('not-a-sealed-value'), null);
   await db.end();
   console.log(`ok  ${label} (${store})`);

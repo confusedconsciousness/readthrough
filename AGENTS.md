@@ -95,6 +95,12 @@ A tour of a repository rides on the same machinery. Its key is `owner/repo/<nega
 3. `repoTour()` turns the file paths and line numbers the model points at into hunks of unchanged lines (padded, merged), pins every point, step and risk to them, and runs `tidy()`. The resulting "PR" is stored with the tour as `s.pr`, and the front end draws it with the PR views wherever `pr.kind === 'repo'`.
 4. The folder is deleted when the read ends.
 
+### A question about a PR
+
+1. `app.js` `ask()` POSTs `/api/ask` with `{ pr, id, text, key }` and reads the same Server-Sent Events as a read (`events()`); `id` is empty for a new conversation.
+2. `askChat()` in `server.js` loads the PR again (the access check, and new commits), finds its tour, and calls `ai.chat` with the context from `ai.askContext` (the PR, then the tour), the last 20 messages and the question. It saves the conversation in `chats` and returns all of it.
+3. Every question sends the context first and unchanged, so the provider caches it and a follow-up costs less: cache markers on the Anthropic API, the system prompt (from a file) for Claude Code, prefix caching for OpenAI and Codex. Keep the context identical between questions; anything that varies (a timestamp, a temp folder in the prompt) goes after it.
+
 ### Files
 
 | File | What's in it |
