@@ -783,7 +783,8 @@
   const LANES = [['client', 'Browser or app'], ['api', 'API'], ['logic', 'Logic'], ['queue', 'Queue and jobs'], ['data', 'Data'], ['external', 'Outside services']];
   function flowMap(flow, nStops, thumb) {
     const N = flow.nodes.slice(0, 24), at = new Map(N.map((n, i) => [n.id, i]));
-    const E = flow.edges.filter((e) => at.has(e.from) && at.has(e.to) && e.from !== e.to).map((e) => ({ ...e, a: at.get(e.from), b: at.get(e.to) }));
+    const E0 = flow.edges.filter((e) => at.has(e.from) && at.has(e.to) && e.from !== e.to).map((e) => ({ ...e, a: at.get(e.from), b: at.get(e.to) }));
+    const E = E0.filter((e, k) => !E0.slice(0, k).some((x) => (x.a === e.b && x.b === e.a && (x.two = true)) || (x.a === e.a && x.b === e.b)));
     const seen = N.map(() => 0), out = N.map(() => []);
     E.forEach((e) => out[e.a].push(e));
     const visit = (i) => { seen[i] = 1; for (const e of out[i]) { if (seen[e.b] === 1) e.back = true; else if (!seen[e.b]) visit(e.b); } seen[i] = 2; };
@@ -803,21 +804,21 @@
       if (c) col.sort((x, y) => bary(x) - bary(y));
       col.forEach((i, r) => (pos[i] = { c, r }));
     });
-    const W = 176, H = 48, GX = 84, GY = 16, P = 8;
+    const W = 184, H = thumb || !N.some((n) => n.note) ? 48 : 70, GX = 64, GY = 14, P = 8;
     let tall = Math.max(...C.map((c) => c.length)) * (H + GY) - GY;
     const hasBack = E.some((e) => e.back);
     C.forEach((col) => col.forEach((i, r) => { pos[i].x = P + pos[i].c * (W + GX); pos[i].y = P + (tall - (col.length * (H + GY) - GY)) / 2 + r * (H + GY); }));
     // Lanes: when every node says which part of the system it lives in, each part gets its own labelled row, so the
     // map reads as "the browser calls the API, which queues a job, which writes a table". Columns keep the call order.
-    const laned = !thumb && N.every((n) => LANES.some(([k]) => k === n.layer)), LG = laned ? 112 : 0;
+    const laned = !thumb && N.every((n) => LANES.some(([k]) => k === n.layer)), LG = 0;
     let lanes = [];
     if (laned) {
       let y = P;
       lanes = LANES.filter(([k]) => N.some((n) => n.layer === k)).map(([k, name]) => {
         const ids = N.map((_, i) => i).filter((i) => N[i].layer === k), per = new Map();
         ids.forEach((i) => per.set(pos[i].c, (per.get(pos[i].c) || 0) + 1));
-        const top = y, h = Math.max(...per.values()) * (H + GY) - GY + 12, row = new Map();
-        ids.forEach((i) => { const r = row.get(pos[i].c) || 0; row.set(pos[i].c, r + 1); pos[i].x = LG + P + pos[i].c * (W + GX); pos[i].y = top + 6 + r * (H + GY); });
+        const top = y, h = Math.max(...per.values()) * (H + GY) - GY + 30, row = new Map();
+        ids.forEach((i) => { const r = row.get(pos[i].c) || 0; row.set(pos[i].c, r + 1); pos[i].x = LG + P + pos[i].c * (W + GX); pos[i].y = top + 22 + r * (H + GY); });
         y += h + 4;
         return { name, top, h };
       });
@@ -848,26 +849,28 @@
         lx = (x1 + x2) / 2; ly = low - 4;
       }
       const label = cut(e.label || '', 16), shown = label && free(lx, ly, label.length * 5.8 + 6);
-      return `<g class="edge${e.back ? ' back' : ''}${label && !shown ? ' crowded' : ''}" data-a="${e.a}" data-b="${e.b}"><path d="${d}" marker-end="url(#arrow)"/>${label ? `<text x="${lx}" y="${ly}" text-anchor="middle">${esc(label)}</text>` : ''}</g>`;
+      return `<g class="edge${e.back ? ' back' : ''}${label && !shown ? ' crowded' : ''}" data-a="${e.a}" data-b="${e.b}"><path d="${d}" marker-end="url(#arrow)"${e.two ? ' marker-start="url(#arrow)"' : ''}/>${label ? `<text x="${lx}" y="${ly}" text-anchor="middle">${esc(label)}</text>` : ''}</g>`;
     }).join('');
 
     const SL = { new: 'A', changed: 'M', removed: 'D' };
+    const wrap = (s, n, k) => { const out = ['']; for (const w of s.split(/\s+/)) { if ((out.at(-1) + ' ' + w).trim().length > n) out.push(''); out[out.length - 1] = (out.at(-1) + ' ' + w).trim(); } return out.length > k ? [...out.slice(0, k - 1), cut(out.slice(k - 1).join(' '), n)] : out; };
     const nodes = N.map((n, i) => {
       const { x, y } = pos[i], st = !thumb && n.stop >= 0 && n.stop < nStops ? n.stop : -1, l = SL[n.status];
+      const lines = !thumb && n.note ? wrap(n.note, 31, 2) : null;
       return `<g class="node s-${esc(n.status)}${st >= 0 ? ' link' : ''}" data-node="${i}" data-id="${esc(n.id)}"${st >= 0 ? ` data-sel="${st}" tabindex="0" role="button" aria-label="${esc(n.label)}, stop ${st + 1}"` : ''} transform="translate(${x},${y})">
         <title>${esc(n.label)} — ${esc(n.where)}</title>
         <rect width="${W}" height="${H}" rx="4"/>
         ${l ? `<text class="nst" x="10" y="20">${l}</text>` : ''}
-        <text class="nl" x="${l ? 24 : 10}" y="20">${esc(cut(n.label, l ? 19 : 21))}</text>
-        <text class="nw" x="10" y="37">${esc(cutL(n.where, st >= 0 ? 22 : 27))}</text>
-        ${st >= 0 ? `<text class="ns" x="${W - 8}" y="37" text-anchor="end">stop ${st + 1}</text>` : ''}
+        <text class="nl" x="${l ? 24 : 10}" y="20">${esc(cut(n.label, (l ? 21 : 23) - (lines && st >= 0 ? 6 : 0)))}</text>
+        ${lines ? lines.map((t, k) => `<text class="nn" x="10" y="${37 + k * 14}">${esc(t)}</text>`).join('') : `<text class="nw" x="10" y="37">${esc(cutL(n.where, st >= 0 ? 23 : 29))}</text>`}
+        ${st >= 0 ? `<text class="ns" x="${W - 8}" y="${lines ? 20 : 37}" text-anchor="end">stop ${st + 1}</text>` : ''}
       </g>`;
     }).join('');
 
     if (!thumb) layout = { pos: new Map(N.map((n, i) => [n.id, pos[i]])), W, H };
     return `<svg viewBox="0 0 ${width} ${height}" ${thumb ? 'preserveAspectRatio="xMidYMid meet"' : `style="width:100%;max-width:${width}px;min-width:${Math.round(width * 0.7)}px"`} role="img" aria-label="How the changed parts connect">
       <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z"/></marker>${thumb ? '' : HOP_MARKER}</defs>
-      ${lanes.map((l) => `<g class="lane-band"><rect x="0" y="${l.top}" width="${width}" height="${l.h}" rx="6"/><text x="12" y="${l.top + l.h / 2 + 4}">${l.name}</text></g>`).join('')}
+      ${lanes.map((l) => `<g class="lane-band"><rect x="0" y="${l.top}" width="${width}" height="${l.h}" rx="6"/><text x="10" y="${l.top + 15}">${l.name}</text></g>`).join('')}
       ${edges}${nodes}${thumb ? '' : '<g class="play"></g>'}</svg>`;
   }
 
@@ -966,8 +969,21 @@
     });
     const A = layout.pos.get(st.from), B = layout.pos.get(st.to);
     if (!A || !B) return;
+    // The whole walkthrough as a numbered route, so the map reads as a story; the current hop drawn over it.
+    let at = null;
+    const taken = new Set(); // a call and its reply share a curve: the second number sits just below the first
+    const route = sc.steps.map((x, k) => {
+      const P = layout.pos.get(x.from), Q = layout.pos.get(x.to);
+      if (!P || !Q) return '';
+      const h = hopPath(P, Q, layout.W, layout.H);
+      while (taken.has(`${Math.round(h.mx)},${Math.round(h.my)}`)) h.my += 18;
+      taken.add(`${Math.round(h.mx)},${Math.round(h.my)}`);
+      if (k === play.i) { at = h.my; return ''; }
+      return `<g class="route${k < play.i ? ' seen' : ''}" data-hop="${k}"><title>${esc(x.what)}</title><path d="${h.d}" marker-end="url(#arrow)"/><circle cx="${h.mx}" cy="${h.my}" r="8"/><text x="${h.mx}" y="${h.my + 3.5}" text-anchor="middle">${k + 1}</text></g>`;
+    }).join('');
     const { d, mx, my } = hopPath(A, B, layout.W, layout.H);
-    $('.play', svg).innerHTML = `<path class="hop" d="${d}" marker-end="url(#arrow-hop)"/>${packet(d)}${st.data ? `<text class="hop-label" x="${mx}" y="${my}" text-anchor="middle">${esc(st.data)}</text>` : ''}`;
+    const ly = at ?? my;
+    $('.play', svg).innerHTML = `${route}<path class="hop" d="${d}" marker-end="url(#arrow-hop)"/>${packet(d)}<text class="hop-label" x="${mx}" y="${ly}" text-anchor="middle">${play.i + 1}${st.data ? `. ${esc(st.data)}` : ''}</text>`;
   }
 
   function goHop(i) { play.i = i; paintStep(); }
